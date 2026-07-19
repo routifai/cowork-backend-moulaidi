@@ -1,0 +1,1 @@
+onlyBuiltDependencies:\n  - '@google/genai'\n  - esbuild\n  - protobufjs

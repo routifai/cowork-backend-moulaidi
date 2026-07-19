@@ -1,0 +1,32 @@
+{
+  "name": "hypatia-backend",
+  "version": "0.3.0",
+  "description": "Hypatia Cowork — engine / agent-sidecar server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "node scripts/fetch-vendor.mjs",
+    "vendor:latest": "node scripts/vendor-latest.mjs",
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "build": "tsc",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/bundle.cjs --external:@opentelemetry/api && node scripts/postbundle.mjs",
+    "start": "node dist/bundle.cjs",
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.80.10",
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@earendil-works/pi-tui": "^0.80.10",
+    "jiti": "^2.7.0",
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  }
+}

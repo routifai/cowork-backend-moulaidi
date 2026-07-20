@@ -164,6 +164,17 @@ describe("extractChatMessages", () => {
 		});
 	});
 
+	it("carries the toolResult's details through to the paired tool call (needed to reconstruct diffs after a session reload)", () => {
+		const toolResultWithDiff = {
+			...toolResultOk,
+			details: { diff: "@@ -1 +1 @@\n-old\n+new" },
+		};
+		const result = extractChatMessages([assistantWithToolCall, toolResultWithDiff]);
+		const msg = result[0] as Record<string, unknown>;
+		const tcs = msg.toolCalls as Array<Record<string, unknown>>;
+		expect(tcs[0].details).toEqual({ diff: "@@ -1 +1 @@\n-old\n+new" });
+	});
+
 	it("pairs error tool results with error status", () => {
 		const input = [assistantWithToolCall, toolResultError];
 		const result = extractChatMessages(input);

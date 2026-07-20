@@ -46,6 +46,7 @@ export function extractChatMessages(
 					args: tc.arguments || tc.input || {},
 					status: "pending" as const,
 					result: "",
+					details: undefined as Record<string, unknown> | undefined,
 				}));
 			if (toolCalls && toolCalls.length > 0) {
 				pendingToolCalls.set(
@@ -76,6 +77,7 @@ export function extractChatMessages(
 				.filter(Boolean)
 				.join("\n");
 			const isError = msg.isError === true;
+			const details = msg.details as Record<string, unknown> | undefined;
 
 			if (callId) {
 				for (const [, calls] of pendingToolCalls) {
@@ -85,6 +87,7 @@ export function extractChatMessages(
 								? ("error" as const)
 								: ("completed" as const);
 							tc.result = resultText || "";
+							tc.details = details;
 							break;
 						}
 					}

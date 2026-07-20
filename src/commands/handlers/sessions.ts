@@ -11,6 +11,7 @@
 
 import { send, log } from "../../protocol.js";
 import { subscribeSession } from "../../prompt-runner.js";
+import { reconstructShowArtifacts } from "../../show-artifact-history.js";
 import type { HandlerDependencies } from "../handler-registry.js";
 import { resolveWorkspace, defaultWorkspaceDir, piAgentDir } from "../../agent-init.js";
 import {
@@ -59,6 +60,22 @@ export async function handleNewSession(deps: HandlerDependencies, cmd: any): Pro
 		deps.setResourceLoader(
 			await buildResourceLoader(deps.workspaceCwd, deps.hypatiaDir, deps.settingsManager),
 		);
+	} else {
+		// Same workspace as before: the resource loader is reused as-is, which
+		// means its cached system prompt (computed at the last reload()) can
+		// predate anything saved to project memory or custom instructions since
+		// then. Refresh it so a brand-new session in the same folder actually
+		// starts with up-to-date memory — mirrors handleLoadSession's identical
+		// "same cwd" fallback below. Best-effort: a failing npm-sourced pi
+		// package must not block creating the new session.
+		try {
+			await deps.resourceLoader.reload();
+		} catch (err) {
+			log(
+				"new_session: resource reload failed (continuing): %s",
+				err instanceof Error ? err.message : String(err),
+			);
+		}
 	}
 	const file = await spawnSession(deps, deps.workspaceCwd);
 	send({ type: "result", id: cmd.id, data: { success: true, cwd: deps.workspaceCwd, file } });
@@ -139,6 +156,7 @@ export async function handleLoadSession(deps: HandlerDependencies, cmd: any): Pr
 			id: cmd.id,
 			data: {
 				messages: loaded.messages,
+				artifacts: reconstructShowArtifacts(loaded.messages),
 				title: loaded.title,
 				model: loaded.model,
 				provider: loaded.provider,

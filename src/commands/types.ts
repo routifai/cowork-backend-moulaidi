@@ -160,6 +160,35 @@ export interface SaveInstructionsCommand {
 	content: string;
 }
 
+// ── Memory commands ─────────────────────────────────────────────────────────
+
+export interface GetMemoryIndexCommand {
+	type: "get_memory_index";
+	id: string;
+}
+
+export interface GetMemoryNoteCommand {
+	type: "get_memory_note";
+	id: string;
+	topic: string;
+}
+
+export interface SaveMemoryNoteCommand {
+	type: "save_memory_note";
+	id: string;
+	topic: string;
+	summary: string;
+	memoryType?: "project" | "preference" | "decision";
+	detail?: string;
+	noteContent?: string;
+}
+
+export interface DeleteMemoryTopicCommand {
+	type: "delete_memory_topic";
+	id: string;
+	topic: string;
+}
+
 // ── Extension commands ─────────────────────────────────────────────────────
 
 export interface ListExtensionsCommand {
@@ -283,6 +312,10 @@ export type Command =
 	| SaveSettingsCommand
 	| GetInstructionsCommand
 	| SaveInstructionsCommand
+	| GetMemoryIndexCommand
+	| GetMemoryNoteCommand
+	| SaveMemoryNoteCommand
+	| DeleteMemoryTopicCommand
 	| ListExtensionsCommand
 	| TasksListCommand
 	| TasksDeleteCommand

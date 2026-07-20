@@ -41,6 +41,12 @@ import {
 	handleGetInstructions,
 	handleSaveInstructions,
 } from "./handlers/settings.js";
+import {
+	handleGetMemoryIndex,
+	handleGetMemoryNote,
+	handleSaveMemoryNote,
+	handleDeleteMemoryTopic,
+} from "./handlers/memory.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 import { send, log, logWarn } from "../protocol.js";
@@ -196,6 +202,26 @@ export function createHandler(deps: HandlerDependencies): (cmd: Command) => Prom
 
 			case "save_instructions":
 				await handleSaveInstructions(deps, cmd as any);
+				break;
+
+			// ═══════════════════════════════════════════════════════════════
+			// Memory
+			// ═══════════════════════════════════════════════════════════════
+
+			case "get_memory_index":
+				await handleGetMemoryIndex(deps, cmd as any);
+				break;
+
+			case "get_memory_note":
+				await handleGetMemoryNote(deps, cmd as any);
+				break;
+
+			case "save_memory_note":
+				await handleSaveMemoryNote(deps, cmd as any);
+				break;
+
+			case "delete_memory_topic":
+				await handleDeleteMemoryTopic(deps, cmd as any);
 				break;
 
 			default:

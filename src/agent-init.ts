@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import {
 	DefaultResourceLoader,
 	ModelRegistry,
@@ -24,13 +24,17 @@ import {
 import { log } from "./protocol.js";
 import { coworkSelfKnowledgePointer, writeAboutDoc } from "./about-cowork.js";
 import { loadInstructions, customInstructionsBlock } from "./instructions-store.js";
+import { memoryIndexBlock } from "./memory-store.js";
 import { loadSettings as loadSettingsStore, saveSettings as saveSettingsStore } from "./settings-store.js";
 // import { readPiPackages, buildExtensionFactories } from "./disk-extension-loader.js";
 
-// Vendored extensions — all stripped in this build except the Anthropic
-// messages protocol bridge (no user-facing tools; only rewrites tool names
-// for Claude-model API compatibility).
+// Vendored extension: the Anthropic messages protocol bridge (no user-facing
+// tools; only rewrites tool names for Claude-model API compatibility).
 import piAnthropicMessages from "./vendor/anthropic-messages/extensions/index.js";
+// First-party extension: lets the agent deliberately render something in
+// the playground side panel (see extensions/show-artifact.ts).
+import showArtifactExtension from "./extensions/show-artifact.js";
+import saveMemoryExtension from "./extensions/save-memory.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -49,6 +53,8 @@ Guidelines:
 - Be concise.
 - Show file paths clearly when working with files.
 - Prefer your built-in tools over shelling out when both work.
+- When something would help a future session — a decision, a preference, a recurring convention, or a codebase fact — call the save_memory tool to persist it across sessions.
+- When a rendered preview (an HTML/SVG page, a formatted document, a code file, or a diff summarizing a multi-file change) would be clearer than describing it in text, call the show_artifact tool. Reuse the same id when updating something you already showed.
 - When greeting a user, do not list all your capabilities. Simply ask what they are working on.`;
 
 // ── Directory helpers ──────────────────────────────────────────────────────
@@ -168,6 +174,8 @@ export async function buildResourceLoader(
 		settingsManager,
 		extensionFactories: [
 			piAnthropicMessages,
+			showArtifactExtension,
+			(pi: ExtensionAPI) => saveMemoryExtension(pi, { baseDir: hypatiaAgentDir(hypatiaDir), workspaceCwd }),
 		],
 		systemPromptOverride: () => {
 			let personaBlock = "";
@@ -183,18 +191,32 @@ export async function buildResourceLoader(
 					);
 				}
 			}
+			let memoryBlock = "";
+			try {
+				memoryBlock = memoryIndexBlock(hypatiaAgentDir(hypatiaDir), workspaceCwd);
+			} catch (err) {
+				log(
+					"memoryIndexBlock failed (project memory omitted): %s",
+					err instanceof Error ? err.message : String(err),
+				);
+			}
+
 			try {
 				const aboutPath = writeAboutDoc(hypatiaAgentDir(hypatiaDir));
-				const base = `${HYPATIA_SYSTEM_PROMPT}\n\n${coworkSelfKnowledgePointer(aboutPath)}`;
-				return personaBlock ? `${base}\n\n${personaBlock}` : base;
+				let base = `${HYPATIA_SYSTEM_PROMPT}\n\n${coworkSelfKnowledgePointer(aboutPath)}`;
+				if (memoryBlock) base += `\n\n${memoryBlock}`;
+				if (personaBlock) base += `\n\n${personaBlock}`;
+				return base;
 			} catch (err) {
 				log(
 					"writeAboutDoc failed (self-knowledge pointer omitted): %s",
 					err instanceof Error ? err.message : String(err),
 				);
-				return personaBlock
+				let base = personaBlock
 					? `${HYPATIA_SYSTEM_PROMPT}\n\n${personaBlock}`
 					: HYPATIA_SYSTEM_PROMPT;
+				if (memoryBlock) base += `\n\n${memoryBlock}`;
+				return base;
 			}
 		},
 		appendSystemPromptOverride: () => [],

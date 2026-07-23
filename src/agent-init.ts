@@ -35,6 +35,7 @@ import piAnthropicMessages from "./vendor/anthropic-messages/extensions/index.js
 // the playground side panel (see extensions/show-artifact.ts).
 import showArtifactExtension from "./extensions/show-artifact.js";
 import saveMemoryExtension from "./extensions/save-memory.js";
+import findSkillExtension from "./extensions/find-skill.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -55,6 +56,7 @@ Guidelines:
 - Prefer your built-in tools over shelling out when both work.
 - When something would help a future session — a decision, a preference, a recurring convention, or a codebase fact — call the save_memory tool to persist it across sessions.
 - When a rendered preview (an HTML/SVG page, a formatted document, a code file, or a diff summarizing a multi-file change) would be clearer than describing it in text, call the show_artifact tool. Reuse the same id when updating something you already showed.
+- If a task might match a specialized skill and the skills listed below don't make it obvious, call find_skill with a short description of the task to search the full skill library.
 - When greeting a user, do not list all your capabilities. Simply ask what they are working on.`;
 
 // ── Directory helpers ──────────────────────────────────────────────────────
@@ -176,6 +178,7 @@ export async function buildResourceLoader(
 			piAnthropicMessages,
 			showArtifactExtension,
 			(pi: ExtensionAPI) => saveMemoryExtension(pi, { baseDir: hypatiaAgentDir(hypatiaDir), workspaceCwd }),
+			(pi: ExtensionAPI) => findSkillExtension(pi, { agentDir: piResourceDir, workspaceCwd }),
 		],
 		systemPromptOverride: () => {
 			let personaBlock = "";

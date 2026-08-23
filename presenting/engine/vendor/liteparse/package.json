@@ -1,0 +1,9 @@
+{
+  "name": "hypatia-presenting-engine-liteparse-vendor",
+  "private": true,
+  "type": "module",
+  "description": "Vendored @llamaindex/liteparse for the Presenting Engine's document-extraction runner (liteparse_runner.mjs). See hypatia-backend/presenting/engine/services/liteparse_service.py.",
+  "dependencies": {
+    "@llamaindex/liteparse": "1.5.2"
+  }
+}

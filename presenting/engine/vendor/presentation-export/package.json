@@ -1,0 +1,9 @@
+{
+  "name": "hypatia-presenting-engine-presentation-export-vendor",
+  "private": true,
+  "description": "Vendored presentation-export runtime (proprietary, fetched by ../sync-presentation-export.mjs) plus its one real external dependency, sharp — index.js itself is not committed, see .gitignore.",
+  "type": "commonjs",
+  "dependencies": {
+    "sharp": "^0.35.3"
+  }
+}

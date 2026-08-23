@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 // of model. Fix centralizes all subscriptions in subscribeSession().
 
 describe("subscribeSession", () => {
-	it("forwards every agent event to stdout", async () => {
+	it("forwards every agent event to stdout, tagged with the runner's session id", async () => {
 		const send = vi.fn();
 		vi.doMock("./protocol.js", () => ({
 			send,
@@ -22,11 +22,16 @@ describe("subscribeSession", () => {
 			logWarn: vi.fn(),
 			logError: vi.fn(),
 		}));
-		const { subscribeSession } = await import("./prompt-runner.js");
+		const { createPromptRunner } = await import("./prompt-runner.js");
+		const runner = createPromptRunner("test-session");
 		let cb: ((e: unknown) => void) | undefined;
-		subscribeSession({ subscribe: (f) => { cb = f; } });
+		runner.subscribeSession({ subscribe: (f: (e: unknown) => void) => { cb = f; } });
 		cb?.({ type: "text", text: "hi" });
-		expect(send).toHaveBeenCalledWith({ type: "event", event: { type: "text", text: "hi" } });
+		expect(send).toHaveBeenCalledWith({
+			type: "event",
+			sessionId: "test-session",
+			event: { type: "text", text: "hi" },
+		});
 		vi.resetModules();
 	});
 

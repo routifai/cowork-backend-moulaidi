@@ -1,0 +1,5 @@
+# Presenting Engine's model calls relay through the Tauri Rust host, not a direct channel to Cowork
+
+The Presenting Engine (Python, `presenting/`) needs to execute LLM calls, but must not hold its own model credentials — Cowork's `ModelRuntime`/`ModelRegistry` is the single place in the app that owns model/auth config. Cowork has no HTTP surface, and per its own architecture, only the Tauri Rust host is allowed to own its stdio pipe. We considered giving the Presenting Engine a second, direct entry point into Cowork (a local socket/named pipe) to cut the hop count, but rejected it: it would mean two different processes are allowed to talk to Cowork's stdio, undermining the single-owner invariant Cowork's docs currently guarantee and that other parts of the app rely on.
+
+Decided instead: the Presenting Engine talks to the Rust host over a new local IPC channel; Rust forwards the request as a new command on Cowork's existing stdio protocol; Cowork's `ModelRuntime` executes it; the response relays back the same path. Three hops instead of one, but the existing "only Rust owns this process" rule holds without exception.

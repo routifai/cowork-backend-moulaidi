@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -24,9 +25,10 @@ import { activateBundledBinaries } from "../bundled-binaries.js";
 import { bindExtensionUi, resolveUiResponse } from "../extension-ui-bridge.js";
 import { createPromptScheduler } from "../prompt-scheduler.js";
 import { readPiPackages } from "../disk-extension-loader.js";
-import { subscribeSession } from "../prompt-runner.js";
+import { createPromptRunner } from "../prompt-runner.js";
 import { log, send } from "../protocol.js";
 import type { AppContainer } from "./container.js";
+import type { SessionState } from "./session-state.js";
 
 const EMBEDDED_ANTHROPIC_KEY = (process.env.ANTHROPIC_API_KEY || "__ANTHROPIC_API_KEY__").trim();
 
@@ -42,23 +44,31 @@ export async function bootstrapApp(): Promise<BootstrappedApp> {
 		initialized: false,
 		modelRuntime: undefined,
 		modelRegistry: undefined,
-		sessionManager: undefined,
 		settingsManager: undefined,
-		session: undefined,
-		resourceLoader: undefined,
 		hypatiaDir: defaultHypatiaDir(),
-		workspaceCwd: resolveWorkspace(undefined, defaultHypatiaDir()),
-		promptScheduler: createPromptScheduler(),
+		sessions: new Map<string, SessionState>(),
+		activeSessionId: undefined,
 	};
 
+	/** The active session's SessionState, or undefined before first init. */
+	function activeSession(): SessionState | undefined {
+		return container.activeSessionId ? container.sessions.get(container.activeSessionId) : undefined;
+	}
+
+	/**
+	 * Full process (re)bootstrap: rebuilds modelRuntime/modelRegistry/
+	 * settingsManager and creates ONE fresh session, replacing every
+	 * previously-tracked session. This mirrors the pre-multi-session
+	 * behavior exactly (reload always meant "start over completely") —
+	 * fixing its blast radius to spare other live sessions is Phase 5 of
+	 * docs/plans/multi-session-concurrency.md, explicitly deferred.
+	 */
 	async function initAgent(hypatiaDirPath: string, workspace?: string) {
 		container.hypatiaDir = hypatiaDirPath || defaultHypatiaDir();
 		activateBundledBinaries();
 
-		if (workspace !== undefined) {
-			container.workspaceCwd = resolveWorkspace(workspace, container.hypatiaDir);
-		}
-		log("Workspace cwd: %s", container.workspaceCwd);
+		const workspaceCwd = resolveWorkspace(workspace, container.hypatiaDir);
+		log("Workspace cwd: %s", workspaceCwd);
 
 		const piDir = piAgentDir();
 		ensureDir(piDir);
@@ -80,32 +90,52 @@ export async function bootstrapApp(): Promise<BootstrappedApp> {
 
 		applyBundledNpm(container.settingsManager);
 
-		container.resourceLoader = await buildResourceLoader(
-			container.workspaceCwd,
+		const resourceLoader = await buildResourceLoader(
+			workspaceCwd,
 			container.hypatiaDir,
 			container.settingsManager,
 		);
 
-		container.sessionManager = SessionManager.create(container.workspaceCwd);
+		const sessionManager = SessionManager.create(workspaceCwd);
 		const result = await createAgentSession({
-			cwd: container.workspaceCwd,
+			cwd: workspaceCwd,
 			modelRuntime: container.modelRuntime,
-			sessionManager: container.sessionManager,
+			sessionManager,
 			settingsManager: container.settingsManager,
-			resourceLoader: container.resourceLoader,
+			resourceLoader,
 		});
-		container.session = result.session;
+		const session = result.session;
+		// Session id = the pi session file path — already the identity the
+		// frontend treats a session by. Falls back to a random id in the rare
+		// case a session has no backing file (e.g. an in-memory session).
+		const id = sessionManager.getSessionFile() ?? randomUUID();
 
-		const coworkActivePath = join(container.workspaceCwd, ".pi", "cowork_active");
+		const coworkActivePath = join(workspaceCwd, ".pi", "cowork_active");
 		try {
 			writeFileSync(coworkActivePath, `${process.pid}`, "utf-8");
 		} catch {
 			// best-effort
 		}
 
-		subscribeSession(container.session);
-		await bindExtensionUi(container.session);
+		const promptRunner = createPromptRunner(id);
+		promptRunner.subscribeSession(session);
+		await bindExtensionUi(session, id);
 
+		// A full (re)init always replaces every tracked session — see doc
+		// comment above.
+		container.sessions.clear();
+		container.sessions.set(id, {
+			id,
+			session,
+			sessionManager,
+			resourceLoader,
+			workspaceCwd,
+			promptScheduler: createPromptScheduler(),
+			promptRunner,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+		});
+		container.activeSessionId = id;
 		container.initialized = true;
 
 		const available = await container.modelRegistry.getAvailable();
@@ -130,14 +160,14 @@ export async function bootstrapApp(): Promise<BootstrappedApp> {
 			type: "ready",
 			models,
 			providers: Array.from(providerMap.values()),
-			activeModel: container.session?.model
+			activeModel: session.model
 				? {
-						provider: container.session.model.provider,
-						id: container.session.model.id,
-						name: container.session.model.name,
+						provider: session.model.provider,
+						id: session.model.id,
+						name: session.model.name,
 					}
 				: null,
-			thinkingLevel: container.session?.thinkingLevel ?? null,
+			thinkingLevel: session.thinkingLevel ?? null,
 		});
 		log("Sidecar ready — %d models available", models.length);
 	}
@@ -149,29 +179,34 @@ export async function bootstrapApp(): Promise<BootstrappedApp> {
 		get modelRegistry() {
 			return container.modelRegistry!;
 		},
-		get session() {
-			return container.session;
-		},
 		get modelRuntime() {
 			return container.modelRuntime;
 		},
 		get settingsManager() {
 			return container.settingsManager;
 		},
-		get sessionManager() {
-			return container.sessionManager;
-		},
-		get resourceLoader() {
-			return container.resourceLoader;
-		},
 		get hypatiaDir() {
 			return container.hypatiaDir;
 		},
-		get workspaceCwd() {
-			return container.workspaceCwd;
+		get session() {
+			return activeSession()?.session;
 		},
-		get promptScheduler() {
-			return container.promptScheduler;
+		get workspaceCwd() {
+			return activeSession()?.workspaceCwd ?? resolveWorkspace(undefined, container.hypatiaDir);
+		},
+		getSession: (id: string) => container.sessions.get(id),
+		addSession: (state: SessionState) => {
+			container.sessions.set(state.id, state);
+		},
+		removeSession: (id: string) => {
+			container.sessions.delete(id);
+		},
+		listSessionIds: () => [...container.sessions.keys()],
+		get activeSessionId() {
+			return container.activeSessionId;
+		},
+		setActiveSessionId: (id: string | undefined) => {
+			container.activeSessionId = id;
 		},
 		initAgent,
 		bindExtensionUi,
@@ -181,18 +216,6 @@ export async function bootstrapApp(): Promise<BootstrappedApp> {
 		},
 		setInitialized: (v: boolean) => {
 			container.initialized = v;
-		},
-		setSession: (s: any) => {
-			container.session = s;
-		},
-		setSessionManager: (sm: any) => {
-			container.sessionManager = sm;
-		},
-		setResourceLoader: (rl: any) => {
-			container.resourceLoader = rl;
-		},
-		setWorkspaceCwd: (cwd: string) => {
-			container.workspaceCwd = cwd;
 		},
 	};
 

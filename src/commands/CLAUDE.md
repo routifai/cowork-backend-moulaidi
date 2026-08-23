@@ -1,0 +1,22 @@
+## Responsibility
+
+The wire protocol (`types.ts`) and the command dispatcher (`handler-registry.ts` + `handlers/`) that turns a parsed JSON command from stdin into pi SDK calls and protocol events back out on stdout.
+
+## Key files
+
+- `types.ts` — every `Command` shape (discriminated union on `type`) that can arrive on stdin: core turn commands (`init`, `get_models`, `get_active_model`, `prompt`, `abort`, `steer`, `follow_up`, `clear_queue`, `set_model`, `ui_response`), session management (`reload`, `new_session`, `get_workspace`, `list_sessions`, `save_session`, `load_session`, `close_session`, `delete_session`, `rename_session`, `set_session_pinned`, `search_sessions`), settings/instructions, memory, plus **reserved-but-unimplemented** extension/skills/tasks/remote commands (see Gotchas). This file is the actual cross-repo contract — `hypatia-frontend` sends these shapes.
+- `handler-registry.ts` — `createHandler(deps: HandlerDependencies)` returns the `handleCommand` closure: a big `switch (cmd.type)` that routes to one `handle*` function per command type, imported from `handlers/`. `HandlerDependencies` is the dependency-injection interface handlers receive instead of touching global state — implemented by `app/bootstrap.ts`.
+- `handlers/core.ts` — turn-execution commands. `resolveTargetSession(deps, cmd)` is the shared helper every session-scoped handler uses: resolves `cmd.sessionId ?? deps.activeSessionId` to a `SessionState`, sending the standard `{ type: "error", message: "Not initialized" }` and returning `undefined` if none exists. `handlePrompt` runs through `state.promptScheduler.schedule(...)` (see `prompt-scheduler.ts` at repo root) rather than calling the runner directly, so concurrent `prompt` commands on one session serialize instead of racing.
+- `handlers/sessions.ts` — session lifecycle. `spawnSession()` is the shared "build a fresh persisting pi session, track it, make it active" helper used by both `handleNewSession` and (inline, not factored out) `handleLoadSession`. Backed by pi's native `SessionManager` (auto-persists to `~/.pi/agent/sessions/`); Cowork's own pinning/custom-title metadata lives separately in `~/.pi/agent/cowork-meta.json` via `pi-session-store.ts`.
+- `handlers/settings.ts`, `handlers/memory.ts` — thin CRUD wrappers over `agent-init.ts`'s settings helpers, `instructions-store.ts`, and `memory-store.ts`. `handleSaveInstructions`/`handleSaveMemoryNote` best-effort call `deps.session.reload()` afterward so the system prompt picks up the change on the *next* turn of the active session; a reload failure is logged, not fatal (the change still applies on the next new session/chat).
+
+## How it's invoked
+
+`app/bootstrap.ts`'s `bootstrapApp()` is the only caller of `createHandler`. The resulting `handleCommand` is passed to `transport/readline-loop.ts`'s `runReadlineLoop`, which calls it once per stdin line. Handlers call back into `deps.initAgent`, `deps.buildResourceLoader`, `deps.bindExtensionUi`, all supplied by `bootstrap.ts`.
+
+## Gotchas
+
+- **`types.ts` defines commands `handler-registry.ts` never handles**: `ListExtensionsCommand`, `SearchSkillsCommand`, `ListSkillsCommand`, `FetchSkillPackumentCommand`, all six `Tasks*Command` variants, and `StartRemoteCommand`/`StopRemoteCommand`/`GetRemoteStatusCommand` are in the `Command` union with no matching `case` — they fall into `default: logWarn("Unknown command...")` and get an error response sent back. If the frontend sends one of these expecting a real response, that's the bug to look at here, not a frontend bug.
+- Only `close_session` (`handleCloseSession`) is allowed to `.abort()` a session other than "restarting itself" — `new_session`/`load_session` must never touch a different session's live `AgentSession`. `handleLoadSession` reloading an already-tracked session file *is* allowed to abort that session's own outgoing `AgentSession` (it's replacing itself, not another session) — see the comment on `CloseSessionCommand` in `types.ts` and the abort call in `handleLoadSession`.
+- `handleReload` calls `deps.initAgent(deps.hypatiaDir)` — i.e. reload is a **global** reset (clears every session), not scoped to the requesting session. See the root `CLAUDE.md` gotcha on this.
+- Many handler signatures use `cmd: any` (only `core.ts`'s handlers are typed against the real `*Command` interfaces) — don't assume compile-time protection against a malformed `cmd` shape in `sessions.ts`/`settings.ts`/`memory.ts`.

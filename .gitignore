@@ -7,3 +7,16 @@
 src/vendor
 *.tsbuildinfo
 package-lock.json
+
+# presenting/ (Hypatia PowerPoint Builder) — Python engine
+presenting/engine/vendor/node_modules
+presenting/engine/vendor/*/node_modules
+presenting/engine/vendor/*/package-lock.json
+presenting/engine/vendor/presentation-export/index.js
+presenting/engine/vendor/presentation-export/py/convert-*
+presenting/engine/vendor/presentation-export/chromium-cache
+presenting/engine/vendor/presentation-export/presenton-export-version.json
+presenting/engine/**/__pycache__
+presenting/engine/**/*.pyc
+presenting/engine/.pytest_cache
+presenting/engine/*.egg-info

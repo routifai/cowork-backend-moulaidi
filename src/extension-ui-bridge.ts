@@ -40,13 +40,13 @@ export function resolveUiResponse(response: PendingUiResponse & { id: string }):
 }
 
 /** Emit a UI request wrapped in the standard event envelope. */
-function emitUiRequest(payload: Record<string, unknown>): void {
-	send({ type: "event", event: { kind: "ui_request", ...payload } });
+function emitUiRequest(sessionId: string, payload: Record<string, unknown>): void {
+	send({ type: "event", sessionId, event: { kind: "ui_request", ...payload } });
 }
 
 /** Tell the frontend to dismiss a dialog the sidecar resolved on its own. */
-function emitUiCancel(id: string): void {
-	send({ type: "event", event: { kind: "ui_cancel", id } });
+function emitUiCancel(sessionId: string, id: string): void {
+	send({ type: "event", sessionId, event: { kind: "ui_cancel", id } });
 }
 
 // ── Minimal Theme stub ────────────────────────────────────────────────────
@@ -69,6 +69,7 @@ const MINIMAL_THEME = {
 // ── Dialog helper ─────────────────────────────────────────────────────────
 
 function createUiDialog<T>(
+	sessionId: string,
 	opts: ExtensionUIDialogOptions | undefined,
 	defaultValue: T,
 	request: Record<string, unknown>,
@@ -85,14 +86,14 @@ function createUiDialog<T>(
 		};
 		const onAbort = () => {
 			cleanup();
-			emitUiCancel(id);
+			emitUiCancel(sessionId, id);
 			resolve(defaultValue);
 		};
 		opts?.signal?.addEventListener("abort", onAbort, { once: true });
 		if (opts?.timeout) {
 			timeoutId = setTimeout(() => {
 				cleanup();
-				emitUiCancel(id);
+				emitUiCancel(sessionId, id);
 				resolve(defaultValue);
 			}, opts.timeout);
 		}
@@ -100,16 +101,17 @@ function createUiDialog<T>(
 			cleanup();
 			resolve(parse(response));
 		});
-		emitUiRequest({ id, ...request });
+		emitUiRequest(sessionId, { id, ...request });
 	});
 }
 
 // ── ExtensionUIContext factory ────────────────────────────────────────────
 
-function createUiContext(): ExtensionUIContext {
+function createUiContext(sessionId: string): ExtensionUIContext {
 	return {
 		select: (title, options, opts) =>
 			createUiDialog<string | undefined>(
+				sessionId,
 				opts,
 				undefined,
 				{ method: "select", title, options, timeout: opts?.timeout },
@@ -117,6 +119,7 @@ function createUiContext(): ExtensionUIContext {
 			),
 		confirm: (title, message, opts) =>
 			createUiDialog<boolean>(
+				sessionId,
 				opts,
 				false,
 				{ method: "confirm", title, message, timeout: opts?.timeout },
@@ -124,6 +127,7 @@ function createUiContext(): ExtensionUIContext {
 			),
 		input: (title, placeholder, opts) =>
 			createUiDialog<string | undefined>(
+				sessionId,
 				opts,
 				undefined,
 				{ method: "input", title, placeholder, timeout: opts?.timeout },
@@ -131,18 +135,24 @@ function createUiContext(): ExtensionUIContext {
 			),
 		editor: (title, prefill) =>
 			createUiDialog<string | undefined>(
+				sessionId,
 				undefined,
 				undefined,
 				{ method: "editor", title, prefill },
 				(r) => (r.cancelled ? undefined : r.value),
 			),
 		notify: (message, type) =>
-			emitUiRequest({ id: randomUUID(), method: "notify", message, notifyType: type }),
+			emitUiRequest(sessionId, { id: randomUUID(), method: "notify", message, notifyType: type }),
 		setStatus: (key, text) =>
-			emitUiRequest({ id: randomUUID(), method: "setStatus", statusKey: key, statusText: text }),
+			emitUiRequest(sessionId, {
+				id: randomUUID(),
+				method: "setStatus",
+				statusKey: key,
+				statusText: text,
+			}),
 		setWidget: (key, content, options) => {
 			if (content === undefined || Array.isArray(content)) {
-				emitUiRequest({
+				emitUiRequest(sessionId, {
 					id: randomUUID(),
 					method: "setWidget",
 					widgetKey: key,
@@ -151,8 +161,9 @@ function createUiContext(): ExtensionUIContext {
 				});
 			}
 		},
-		setTitle: (title) => emitUiRequest({ id: randomUUID(), method: "setTitle", title }),
-		setEditorText: (text) => emitUiRequest({ id: randomUUID(), method: "set_editor_text", text }),
+		setTitle: (title) => emitUiRequest(sessionId, { id: randomUUID(), method: "setTitle", title }),
+		setEditorText: (text) =>
+			emitUiRequest(sessionId, { id: randomUUID(), method: "set_editor_text", text }),
 		pasteToEditor(text) {
 			this.setEditorText(text);
 		},
@@ -189,8 +200,9 @@ export async function bindExtensionUi(
 	session: {
 		bindExtensions: (opts: { uiContext: ExtensionUIContext }) => Promise<void>;
 	},
+	sessionId: string,
 ): Promise<void> {
-	await session.bindExtensions({ uiContext: createUiContext() });
+	await session.bindExtensions({ uiContext: createUiContext(sessionId) });
 }
 
 // ── Whitelisted extension config file helpers ────────────────────────────

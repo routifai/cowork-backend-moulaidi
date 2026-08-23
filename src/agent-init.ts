@@ -26,7 +26,7 @@ import { coworkSelfKnowledgePointer, writeAboutDoc } from "./about-cowork.js";
 import { loadInstructions, customInstructionsBlock } from "./instructions-store.js";
 import { memoryIndexBlock } from "./memory-store.js";
 import { loadSettings as loadSettingsStore, saveSettings as saveSettingsStore } from "./settings-store.js";
-// import { readPiPackages, buildExtensionFactories } from "./disk-extension-loader.js";
+import { buildExtensionFactories } from "./disk-extension-loader.js";
 
 // Vendored extension: the Anthropic messages protocol bridge (no user-facing
 // tools; only rewrites tool names for Claude-model API compatibility).
@@ -57,6 +57,8 @@ Guidelines:
 - When something would help a future session — a decision, a preference, a recurring convention, or a codebase fact — call the save_memory tool to persist it across sessions.
 - When a rendered preview (an HTML/SVG page, a formatted document, a code file, or a diff summarizing a multi-file change) would be clearer than describing it in text, call the show_artifact tool. Reuse the same id when updating something you already showed.
 - If a task might match a specialized skill and the skills listed below don't make it obvious, call find_skill with a short description of the task to search the full skill library.
+- For a substantial or risky change, you may suggest the user enable plan mode (type /plan) so you can propose a plan for review before making changes — you cannot toggle it yourself.
+- If plan mode is active, ask clarifying questions with the plan_mode_question tool when a decision materially affects the plan rather than guessing.
 - When greeting a user, do not list all your capabilities. Simply ask what they are working on.`;
 
 // ── Directory helpers ──────────────────────────────────────────────────────
@@ -165,20 +167,32 @@ export async function buildResourceLoader(
 	const piResourceDir = piAgentDir();
 	ensureDir(piResourceDir);
 
-	// Extensions + skills load pi-native from the shared agentDir (~/.pi/agent):
-	// pi's `settings.json` packages and on-disk resources. `extensionFactories`
-	// below adds cowork's own programmatic extensions on top.
-	const diskExtensionFactories: ExtensionFactory[] = [];
+	// Disk/npm-sourced extensions (pi's `settings.json` packages plus loose
+	// files in ~/.pi/agent/extensions) are loaded through our own jiti loader,
+	// not DefaultResourceLoader's built-in resolution — see
+	// disk-extension-loader.ts's doc comment (issue #147): the built-in path
+	// resolves imports against a real node_modules tree, which doesn't exist
+	// in the shipped bundle. Using the same loader in dev and prod means dev
+	// exercises exactly what ships, not a different, accidentally-working path.
+	const { factories: diskExtensionFactories, paths: diskExtensionPaths } = await buildExtensionFactories({
+		cwd: workspaceCwd,
+		agentDir: piResourceDir,
+		settingsManager,
+	});
+	log("disk/npm extensions resolved: %d", diskExtensionPaths.length);
+	for (const path of diskExtensionPaths) log("  - %s", path);
 
 	const loader = new DefaultResourceLoader({
 		cwd: workspaceCwd,
 		agentDir: piResourceDir,
 		settingsManager,
+		noExtensions: true,
 		extensionFactories: [
 			piAnthropicMessages,
 			showArtifactExtension,
 			(pi: ExtensionAPI) => saveMemoryExtension(pi, { baseDir: hypatiaAgentDir(hypatiaDir), workspaceCwd }),
 			(pi: ExtensionAPI) => findSkillExtension(pi, { agentDir: piResourceDir, workspaceCwd }),
+			...diskExtensionFactories,
 		],
 		systemPromptOverride: () => {
 			let personaBlock = "";

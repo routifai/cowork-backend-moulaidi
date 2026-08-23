@@ -1,0 +1,8 @@
+{
+  "name": "hypatia-presenting-engine-vendor-tools",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@puppeteer/browsers": "^3.2.1"
+  }
+}

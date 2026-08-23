@@ -18,6 +18,7 @@ import {
 	handleClearQueue,
 	handleUiResponse,
 	handleSetModel,
+	handleCompleteModelCall,
 } from "./handlers/core.js";
 
 // ── Session handlers ───────────────────────────────────────────────────────
@@ -28,11 +29,24 @@ import {
 	handleListSessions,
 	handleSaveSession,
 	handleLoadSession,
+	handleCloseSession,
 	handleDeleteSession,
 	handleRenameSession,
 	handleSetSessionPinned,
 	handleSearchSessions,
 } from "./handlers/sessions.js";
+
+// ── Presenting handlers ────────────────────────────────────────────────────
+import { handlePresentingPing } from "../presenting/commands/ping.js";
+import { handlePresentingStartGeneration } from "../presenting/commands/start-generation.js";
+import { handlePresentingGetPresentation } from "../presenting/commands/get-presentation.js";
+import { handlePresentingChatEdit } from "../presenting/commands/chat-edit.js";
+import { handlePresentingParseDocument } from "../presenting/commands/parse-document.js";
+import { handlePresentingExportPresentation } from "../presenting/commands/export-presentation.js";
+import { handlePresentingEditSlide } from "../presenting/commands/edit-slide.js";
+import { handlePresentingImportTemplate } from "../presenting/commands/import-template.js";
+import { handlePresentingListImportedTemplates } from "../presenting/commands/list-imported-templates.js";
+import { handlePresentingDeleteImportedTemplate } from "../presenting/commands/delete-imported-template.js";
 
 // ── Settings handlers ──────────────────────────────────────────────────────
 import {
@@ -52,38 +66,40 @@ import {
 import { send, log, logWarn } from "../protocol.js";
 import type { Command } from "./types.js";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { SessionState } from "../app/session-state.js";
 
 export interface HandlerDependencies {
-	// Agent infrastructure
+	// Agent infrastructure — genuinely process-wide, one for the whole sidecar
 	initialized: boolean;
 	modelRegistry: ModelRegistry;
-	session: any;
 	modelRuntime: any;
 	settingsManager: any;
-	sessionManager: any;
-	resourceLoader: any;
-
-	// Directories
 	hypatiaDir: string;
+
+	/**
+	 * Back-compat resolution: "whichever session is currently active."
+	 * Used by commands that don't carry their own sessionId yet (memory,
+	 * instructions/settings). Resolves to undefined if no session exists.
+	 */
+	session: any;
 	workspaceCwd: string;
 
-	// Prompt scheduling
-	promptScheduler: {
-		schedule: (task: () => Promise<void>, onError: (err: unknown) => void) => void;
-	};
+	// Per-session state (session id = pi session file path)
+	getSession: (id: string) => SessionState | undefined;
+	addSession: (state: SessionState) => void;
+	removeSession: (id: string) => void;
+	listSessionIds: () => string[];
+	activeSessionId: string | undefined;
+	setActiveSessionId: (id: string | undefined) => void;
 
 	// Functions
 	initAgent: (hypatiaDir: string, workspace?: string) => Promise<void>;
 	buildResourceLoader: (cwd: string, opts?: any) => Promise<any>;
-	bindExtensionUi: (session: any) => Promise<void>;
+	bindExtensionUi: (session: any, sessionId: string) => Promise<void>;
 	resolveUiResponse: (response: any) => void;
 
 	// State mutation helpers
 	setInitialized: (v: boolean) => void;
-	setSession: (s: any) => void;
-	setSessionManager: (sm: any) => void;
-	setResourceLoader: (rl: any) => void;
-	setWorkspaceCwd: (cwd: string) => void;
 }
 
 /**
@@ -140,6 +156,10 @@ export function createHandler(deps: HandlerDependencies): (cmd: Command) => Prom
 				await handleSetModel(deps, cmd as any);
 				break;
 
+			case "complete_model_call":
+				await handleCompleteModelCall(deps, cmd as any);
+				break;
+
 			// ═══════════════════════════════════════════════════════════════
 			// Session management
 			// ═══════════════════════════════════════════════════════════════
@@ -166,6 +186,10 @@ export function createHandler(deps: HandlerDependencies): (cmd: Command) => Prom
 
 			case "load_session":
 				await handleLoadSession(deps, cmd as any);
+				break;
+
+			case "close_session":
+				await handleCloseSession(deps, cmd as any);
 				break;
 
 			case "delete_session":
@@ -224,13 +248,57 @@ export function createHandler(deps: HandlerDependencies): (cmd: Command) => Prom
 				await handleDeleteMemoryTopic(deps, cmd as any);
 				break;
 
-			default:
-				logWarn("Unknown command: %s", (cmd as Command).type);
-				send({
-					type: "error",
-					id: "unknown",
-					message: `Unknown command: ${(cmd as Command).type}`,
-				});
+		// ═══════════════════════════════════════════════════════════════
+		// Presenting Engine
+		// ═══════════════════════════════════════════════════════════════
+
+		case "presenting_ping":
+			await handlePresentingPing(cmd as any);
+			break;
+
+		case "presenting_start_generation":
+			await handlePresentingStartGeneration(deps, cmd as any);
+			break;
+
+		case "presenting_get_presentation":
+			await handlePresentingGetPresentation(cmd as any);
+			break;
+
+		case "presenting_chat_edit":
+			await handlePresentingChatEdit(deps, cmd as any);
+			break;
+
+		case "presenting_parse_document":
+			await handlePresentingParseDocument(cmd as any);
+			break;
+
+		case "presenting_export_presentation":
+			await handlePresentingExportPresentation(cmd as any);
+			break;
+
+		case "presenting_edit_slide":
+			await handlePresentingEditSlide(deps, cmd as any);
+			break;
+
+		case "presenting_import_template":
+			await handlePresentingImportTemplate(deps, cmd as any);
+			break;
+
+		case "presenting_list_imported_templates":
+			await handlePresentingListImportedTemplates(deps, cmd as any);
+			break;
+
+		case "presenting_delete_imported_template":
+			await handlePresentingDeleteImportedTemplate(deps, cmd as any);
+			break;
+
+		default:
+			logWarn("Unknown command: %s", (cmd as Command).type);
+			send({
+				type: "error",
+				id: "unknown",
+				message: `Unknown command: ${(cmd as Command).type}`,
+			});
 		}
 	};
 }

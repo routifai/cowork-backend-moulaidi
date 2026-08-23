@@ -54,9 +54,14 @@ import { createJiti } from "jiti/static";
 // Static imports so esbuild bundles these into the sidecar. They are the
 // modules extensions are allowed to import; `virtualModules` (below) maps the
 // bare specifiers to these in-bundle copies. Mirrors the VIRTUAL_MODULES map
-// in pi's own core/extensions/loader.ts.
+// in pi's own core/extensions/loader.ts — including that map's own quirk of
+// resolving the bare `@earendil-works/pi-ai` specifier to the `/compat` entry
+// point, not `/dist/index.js`: extensions written against pi-ai's older,
+// pre-split API (e.g. `~/.pi/agent/extensions/custom-compaction.ts`,
+// `summarize.ts`) import `@earendil-works/pi-ai/compat` directly, or expect
+// the bare specifier to still expose that surface.
 import * as _piAgentCore from "@earendil-works/pi-agent-core";
-import * as _piAi from "@earendil-works/pi-ai";
+import * as _piAiCompat from "@earendil-works/pi-ai/compat";
 import * as _piAiOauth from "@earendil-works/pi-ai/oauth";
 import * as _piCodingAgent from "@earendil-works/pi-coding-agent";
 import * as _piTui from "@earendil-works/pi-tui";
@@ -73,13 +78,15 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@sinclair/typebox/value": _typeboxValue,
 	"@earendil-works/pi-agent-core": _piAgentCore,
 	"@earendil-works/pi-tui": _piTui,
-	"@earendil-works/pi-ai": _piAi,
+	"@earendil-works/pi-ai": _piAiCompat,
+	"@earendil-works/pi-ai/compat": _piAiCompat,
 	"@earendil-works/pi-ai/oauth": _piAiOauth,
 	"@earendil-works/pi-coding-agent": _piCodingAgent,
 	// Legacy scope some published extensions still import under.
 	"@mariozechner/pi-agent-core": _piAgentCore,
 	"@mariozechner/pi-tui": _piTui,
-	"@mariozechner/pi-ai": _piAi,
+	"@mariozechner/pi-ai": _piAiCompat,
+	"@mariozechner/pi-ai/compat": _piAiCompat,
 	"@mariozechner/pi-ai/oauth": _piAiOauth,
 	"@mariozechner/pi-coding-agent": _piCodingAgent,
 };

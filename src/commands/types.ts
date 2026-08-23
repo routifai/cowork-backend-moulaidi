@@ -21,6 +21,8 @@ export interface GetModelsCommand {
 export interface GetActiveModelCommand {
 	type: "get_active_model";
 	id: string;
+	/** Which session to target. Omitted = the currently active session (back-compat). */
+	sessionId?: string;
 }
 
 export interface PromptCommand {
@@ -28,11 +30,15 @@ export interface PromptCommand {
 	id: string;
 	text: string;
 	_origin?: "remote";
+	/** Which session to target. Omitted = the currently active session (back-compat). */
+	sessionId?: string;
 }
 
 export interface AbortCommand {
 	type: "abort";
 	id: string;
+	/** Which session to target. Omitted = the currently active session (back-compat). */
+	sessionId?: string;
 }
 
 export interface SteerCommand {
@@ -40,6 +46,8 @@ export interface SteerCommand {
 	id: string;
 	text: string;
 	images?: SteerImage[];
+	/** Which session to target. Omitted = the currently active session (back-compat). */
+	sessionId?: string;
 }
 
 export interface FollowUpCommand {
@@ -47,11 +55,15 @@ export interface FollowUpCommand {
 	id: string;
 	text: string;
 	images?: SteerImage[];
+	/** Which session to target. Omitted = the currently active session (back-compat). */
+	sessionId?: string;
 }
 
 export interface ClearQueueCommand {
 	type: "clear_queue";
 	id: string;
+	/** Which session to target. Omitted = the currently active session (back-compat). */
+	sessionId?: string;
 }
 
 export interface SteerImage {
@@ -68,6 +80,25 @@ export interface SetModelCommand {
 	id: string;
 	provider: string;
 	model: string;
+	/** Which session to target. Omitted = the currently active session (back-compat). */
+	sessionId?: string;
+}
+
+/**
+ * One-shot model completion, not tied to any agent session — the relay
+ * mechanism the Presenting Engine (a separate Python process, see
+ * `presenting/CONTEXT.md`) uses since it holds no model credentials itself.
+ * Sent by the Tauri Rust host on the Presenting Engine's behalf, not by the
+ * frontend directly. See `docs/adr/0002-presenting-model-calls-relay-via-rust-host.md`.
+ */
+export interface CompleteModelCallCommand {
+	type: "complete_model_call";
+	id: string;
+	provider: string;
+	model: string;
+	systemPrompt?: string;
+	messages: unknown[];
+	tools?: unknown[];
 }
 
 // ── Session commands ───────────────────────────────────────────────────────
@@ -113,6 +144,18 @@ export interface DeleteSessionCommand {
 	type: "delete_session";
 	id: string;
 	sessionFile: string;
+}
+
+/**
+ * Explicitly aborts and untracks a specific live session (identified by its
+ * session file path / sessionId). The only command allowed to abort a
+ * session other than "restarting" it via load_session on the same file —
+ * new_session/load_session never touch a different session's AgentSession.
+ */
+export interface CloseSessionCommand {
+	type: "close_session";
+	id: string;
+	sessionId: string;
 }
 
 export interface RenameSessionCommand {
@@ -286,6 +329,100 @@ export interface UiResponseCommand {
 	cancelled?: boolean;
 }
 
+// ── Presenting commands ─────────────────────────────────────────────────────
+
+export interface PresentingPingCommand {
+	type: "presenting_ping";
+	id: string;
+}
+
+export interface PresentingStartGenerationCommand {
+	type: "presenting_start_generation";
+	id: string;
+	content?: string;
+	template?: string;
+	provider?: string;
+	model?: string;
+	nSlides?: number;
+	language?: string;
+	tone?: string;
+	verbosity?: string;
+	instructions?: string;
+	includeTitleSlide?: boolean;
+	includeTableOfContents?: boolean;
+	documentText?: string;
+	documentName?: string;
+	webSearch?: boolean;
+	webSearchProvider?: string;
+}
+
+export interface PresentingGetPresentationCommand {
+	type: "presenting_get_presentation";
+	id: string;
+	presentationId: string;
+}
+
+export interface PresentingParseDocumentCommand {
+	type: "presenting_parse_document";
+	id: string;
+	filePath: string;
+	language?: string;
+}
+
+export interface PresentingExportPresentationCommand {
+	type: "presenting_export_presentation";
+	id: string;
+	presentationId: string;
+	outputPath: string;
+}
+
+export interface PresentingEditSlideCommand {
+	type: "presenting_edit_slide";
+	id: string;
+	presentationId: string;
+	tool: string;
+	args?: Record<string, unknown>;
+}
+
+export interface PresentingChatAttachment {
+	name?: string;
+	filePath: string;
+}
+
+export interface PresentingChatEditCommand {
+	type: "presenting_chat_edit";
+	id: string;
+	presentationId: string;
+	message: string;
+	provider: string;
+	model: string;
+	conversationId?: string;
+	presentationType?: string;
+	chatMode?: "presentation" | "outline";
+	attachments?: PresentingChatAttachment[];
+}
+
+/** Import a user-uploaded .pptx as a new, workspace-scoped Imported Template (see presenting/CONTEXT.md). */
+export interface PresentingImportTemplateCommand {
+	type: "presenting_import_template";
+	id: string;
+	pptxPath: string;
+	name?: string;
+	provider: string;
+	model: string;
+}
+
+export interface PresentingListImportedTemplatesCommand {
+	type: "presenting_list_imported_templates";
+	id: string;
+}
+
+export interface PresentingDeleteImportedTemplateCommand {
+	type: "presenting_delete_imported_template";
+	id: string;
+	templateId: string;
+}
+
 // ── Union type ─────────────────────────────────────────────────────────────
 
 export type Command =
@@ -298,9 +435,11 @@ export type Command =
 	| FollowUpCommand
 	| ClearQueueCommand
 	| SetModelCommand
+	| CompleteModelCallCommand
 	| ReloadCommand
 	| SaveSessionCommand
 	| LoadSessionCommand
+	| CloseSessionCommand
 	| DeleteSessionCommand
 	| RenameSessionCommand
 	| SetSessionPinnedCommand
@@ -329,4 +468,14 @@ export type Command =
 	| StartRemoteCommand
 	| StopRemoteCommand
 	| GetRemoteStatusCommand
-	| UiResponseCommand;
+	| UiResponseCommand
+	| PresentingPingCommand
+	| PresentingStartGenerationCommand
+	| PresentingGetPresentationCommand
+	| PresentingChatEditCommand
+	| PresentingParseDocumentCommand
+	| PresentingExportPresentationCommand
+	| PresentingEditSlideCommand
+	| PresentingImportTemplateCommand
+	| PresentingListImportedTemplatesCommand
+	| PresentingDeleteImportedTemplateCommand;

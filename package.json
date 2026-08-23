@@ -9,7 +9,7 @@
     "vendor:latest": "node scripts/vendor-latest.mjs",
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "build": "tsc",
-    "bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/bundle.cjs --external:@opentelemetry/api && node scripts/postbundle.mjs",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/bundle.cjs --external:@opentelemetry/api --external:better-sqlite3 && node scripts/postbundle.mjs",
     "start": "node dist/bundle.cjs",
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit"
@@ -19,11 +19,16 @@
     "@earendil-works/pi-ai": "^0.80.10",
     "@earendil-works/pi-coding-agent": "^0.80.10",
     "@earendil-works/pi-tui": "^0.80.10",
+    "better-sqlite3": "^13.0.3",
     "jiti": "^2.7.0",
-    "typebox": "^1.1.24"
+    "openai": "^7.5.0",
+    "typebox": "^1.1.24",
+    "uuid": "^14.0.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.0.0",
+    "@types/uuid": "^11.0.0",
     "esbuild": "^0.28.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",

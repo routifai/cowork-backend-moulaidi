@@ -390,6 +390,12 @@ export interface PresentingRestoreSlideCommand {
 	};
 }
 
+/** List bundled community Smart decks (real HTML slides pulled from Presenton's public gallery) usable as an optional design-reference style anchor for a new generation. */
+export interface PresentingListSmartExamplesCommand {
+	type: "presenting_list_smart_examples";
+	id: string;
+}
+
 export interface PresentingChatAttachment {
 	name?: string;
 	filePath: string;
@@ -460,4 +466,5 @@ export type Command =
 	| PresentingChatEditCommand
 	| PresentingParseDocumentCommand
 	| PresentingExportPresentationCommand
-	| PresentingRestoreSlideCommand;
+	| PresentingRestoreSlideCommand
+	| PresentingListSmartExamplesCommand;

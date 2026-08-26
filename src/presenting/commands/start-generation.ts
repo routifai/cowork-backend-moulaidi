@@ -3,6 +3,7 @@ import type { HandlerDependencies } from "../../commands/handler-registry.js";
 import { initDb, getDb } from "../db/index.js";
 import { saveGeneratedSmartPresentation } from "../db/presentation-store.js";
 import { generateSmartPresentation, SmartGenerationError } from "../services/smart-generation.js";
+import { getSmartExampleReferenceSlides } from "../services/smart-examples.js";
 import { PRESENTATION_MEMORY_SERVICE } from "../services/memory-layer.js";
 
 export function buildUploadedTemplatePrompt(opts: {
@@ -36,6 +37,9 @@ export async function handlePresentingStartGeneration(deps: HandlerDependencies,
     return;
   }
 
+  const designReferenceId = cmd.designReferenceId as string | undefined;
+  const designReference = designReferenceId ? getSmartExampleReferenceSlides(designReferenceId) : null;
+
   try {
     const result = await generateSmartPresentation(deps, {
       content: content!,
@@ -48,6 +52,7 @@ export async function handlePresentingStartGeneration(deps: HandlerDependencies,
       instructions: cmd.instructions as string | undefined,
       include_title_slide: cmd.includeTitleSlide !== false,
       include_table_of_contents: Boolean(cmd.includeTableOfContents),
+      design_reference: designReference,
     });
 
     initDb();

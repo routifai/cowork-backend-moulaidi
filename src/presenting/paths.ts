@@ -33,3 +33,8 @@ export function exportRuntimeDir(): string {
 export function liteparseDir(): string {
 	return join(presentingEngineRoot(), "vendor", "liteparse");
 }
+
+/** hypatia-backend/presenting/smart-examples — bundled community Smart decks, used as optional design-reference style anchors. */
+export function smartExamplesDir(): string {
+	return join(BACKEND_ROOT, "presenting", "smart-examples");
+}

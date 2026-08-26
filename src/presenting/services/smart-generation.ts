@@ -616,6 +616,12 @@ export function resolveSmartSlideCount(value: number | null | undefined): number
   return Math.min(value, MAX_SMART_SLIDE_COUNT);
 }
 
+export interface SmartGenerationProgressEvent {
+  slideIndex: number;
+  totalSlides: number;
+  status: "started" | "done";
+}
+
 export async function generateSmartPresentation(
   deps: { modelRuntime: any; modelRegistry: any },
   opts: {
@@ -630,6 +636,7 @@ export async function generateSmartPresentation(
     include_title_slide?: boolean;
     include_table_of_contents?: boolean;
     design_reference?: { sourceId: number; title: string; slides: string[] } | null;
+    onProgress?: (event: SmartGenerationProgressEvent) => void;
   },
 ): Promise<GeneratedSmartPresentation> {
   const found = deps.modelRegistry.find(opts.provider, opts.model);
@@ -657,10 +664,33 @@ export async function generateSmartPresentation(
     });
 
     try {
-      const msg = await deps.modelRuntime.completeSimple(found, {
+      const stream = deps.modelRuntime.streamSimple(found, {
         systemPrompt: SMART_DECK_SYSTEM_PROMPT,
         messages: [{ role: "user", content: [{ type: "text", text: userPrompt }] }],
       });
+
+      // Report per-slide progress as delimiters complete in the streamed
+      // text, instead of waiting silently for the whole deck. Requested
+      // directly: the frontend has no way to show "slide 2 of 4" today
+      // because generation is one big blocking call — this is that signal.
+      let buffer = "";
+      let startedCount = 0;
+      let doneCount = 0;
+      for await (const event of stream) {
+        if (event.type !== "text_delta" || !event.delta) continue;
+        buffer += event.delta;
+        const starts = (buffer.match(/<!--\s*SLIDE_START\s*-->/gi) ?? []).length;
+        while (startedCount < starts) {
+          opts.onProgress?.({ slideIndex: startedCount, totalSlides: nSlides, status: "started" });
+          startedCount++;
+        }
+        const ends = (buffer.match(/<!--\s*SLIDE_END\s*-->/gi) ?? []).length;
+        while (doneCount < ends) {
+          opts.onProgress?.({ slideIndex: doneCount, totalSlides: nSlides, status: "done" });
+          doneCount++;
+        }
+      }
+      const msg = await stream.result();
       const text = extractText(msg);
       if (!text.trim()) throw new SmartGenerationError("Model returned no text content while generating the Smart presentation");
 

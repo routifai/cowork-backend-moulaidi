@@ -53,6 +53,7 @@ export async function handlePresentingStartGeneration(deps: HandlerDependencies,
       include_title_slide: cmd.includeTitleSlide !== false,
       include_table_of_contents: Boolean(cmd.includeTableOfContents),
       design_reference: designReference,
+      onProgress: (event) => send({ type: "event", event: { kind: "presenting_generation_progress", ...event } }),
     });
 
     initDb();

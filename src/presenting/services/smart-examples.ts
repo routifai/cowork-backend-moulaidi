@@ -16,14 +16,12 @@ import { smartExamplesDir } from "../paths.js";
 export interface SmartExampleManifestEntry {
 	file: string;
 	title: string;
-	author: string;
 	slides: number;
 }
 
 export interface SmartExampleSummary {
 	id: string;
 	title: string;
-	author: string;
 	slideCount: number;
 	previewUrl: string;
 }
@@ -54,7 +52,6 @@ export function listSmartExamples(): SmartExampleSummary[] {
 	return readManifest().map((entry) => ({
 		id: idFromFile(entry.file),
 		title: entry.title,
-		author: entry.author,
 		slideCount: entry.slides,
 		previewUrl: `/smart-example-previews/${idFromFile(entry.file)}.png`,
 	}));

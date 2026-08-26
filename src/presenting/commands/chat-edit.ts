@@ -34,12 +34,9 @@ export async function handlePresentingChatEdit(deps: HandlerDependencies, cmd: R
       conversationId,
       provider,
       model,
-      presentationType: String(cmd.presentationType ?? cmd.presentation_type ?? "standard"),
       modelRuntime: deps.modelRuntime,
       modelRegistry: deps.modelRegistry,
       chatMode: (cmd.chatMode ?? cmd.chat_mode ?? "presentation") as "presentation" | "outline",
-      hypatiaDir: deps.hypatiaDir,
-      workspaceCwd: deps.workspaceCwd,
     });
     const attachments = Array.isArray(cmd.attachments)
       ? (cmd.attachments as Array<Record<string, unknown>>)

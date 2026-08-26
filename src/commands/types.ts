@@ -376,14 +376,6 @@ export interface PresentingExportPresentationCommand {
 	outputPath: string;
 }
 
-export interface PresentingEditSlideCommand {
-	type: "presenting_edit_slide";
-	id: string;
-	presentationId: string;
-	tool: string;
-	args?: Record<string, unknown>;
-}
-
 /** Restores one slide's raw stored state (a snapshot captured client-side before a chat edit) — a direct DB write, no LLM involved. Powers the "keep original / keep edit" comparison after a chat turn. */
 export interface PresentingRestoreSlideCommand {
 	type: "presenting_restore_slide";
@@ -414,27 +406,6 @@ export interface PresentingChatEditCommand {
 	presentationType?: string;
 	chatMode?: "presentation" | "outline";
 	attachments?: PresentingChatAttachment[];
-}
-
-/** Import a user-uploaded .pptx as a new, workspace-scoped Imported Template (see presenting/CONTEXT.md). */
-export interface PresentingImportTemplateCommand {
-	type: "presenting_import_template";
-	id: string;
-	pptxPath: string;
-	name?: string;
-	provider: string;
-	model: string;
-}
-
-export interface PresentingListImportedTemplatesCommand {
-	type: "presenting_list_imported_templates";
-	id: string;
-}
-
-export interface PresentingDeleteImportedTemplateCommand {
-	type: "presenting_delete_imported_template";
-	id: string;
-	templateId: string;
 }
 
 // ── Union type ─────────────────────────────────────────────────────────────
@@ -489,8 +460,4 @@ export type Command =
 	| PresentingChatEditCommand
 	| PresentingParseDocumentCommand
 	| PresentingExportPresentationCommand
-	| PresentingEditSlideCommand
-	| PresentingImportTemplateCommand
-	| PresentingListImportedTemplatesCommand
-	| PresentingDeleteImportedTemplateCommand
 	| PresentingRestoreSlideCommand;

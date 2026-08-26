@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initDb, closeDb } from "../db/index.js";
-import { saveGeneratedPresentation } from "../db/presentation-store.js";
+import { saveGeneratedSmartPresentation } from "../db/presentation-store.js";
 import { handlePresentingPing } from "../commands/ping.js";
 import { handlePresentingGetPresentation } from "../commands/get-presentation.js";
 
@@ -40,15 +40,17 @@ describe("presenting commands", () => {
 
 	it("get_presentation returns a frontend-shaped deck", async () => {
 		initDb();
-		const id = saveGeneratedPresentation(
-			{
-				title: "Deck",
-				template: "general",
-				language: "English",
-				slides: [{ layout: "title", content: { title: "Hi" }, ui: { id: "title" } }],
-			},
-			() => ({ layouts: [{ id: "title", components: [] }] }),
-		);
+		const id = saveGeneratedSmartPresentation({
+			title: "Deck",
+			slides: [
+				{
+					title: "Hi",
+					slide_type: "title",
+					speaker_note: "",
+					html: `<section data-slide-type="title" class="relative h-[720px] w-[1280px] overflow-hidden"><h1>Hi</h1></section>`,
+				},
+			],
+		});
 
 		const sent = await sentMessages();
 		sent.length = 0;
@@ -56,7 +58,7 @@ describe("presenting commands", () => {
 		const msg = sent.at(-1) as { type: string; data: Record<string, unknown> };
 		expect(msg.type).toBe("result");
 		expect(msg.data.presentation_id).toBe(id);
-		expect(msg.data.template).toBe("general");
+		expect(msg.data.generation_mode).toBe("smart");
 		expect(msg.data.n_slides).toBe(1);
 		expect(Array.isArray(msg.data.slides)).toBe(true);
 	});

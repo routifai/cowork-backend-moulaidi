@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { loadsJsonish } from "../utils/jsonish.js";
-import { presentingEngineRoot, templatesDir } from "../paths.js";
-import { existsSync } from "node:fs";
+import { presentingEngineRoot } from "../paths.js";
 import { join } from "node:path";
 
 describe("presenting paths", () => {
 	it("resolves the engine root under hypatia-backend", () => {
 		const root = presentingEngineRoot();
 		expect(root.endsWith(join("presenting", "engine"))).toBe(true);
-		expect(existsSync(templatesDir()) || existsSync(join(root, "templates"))).toBe(true);
 	});
 });
 

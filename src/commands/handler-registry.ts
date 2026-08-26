@@ -43,10 +43,6 @@ import { handlePresentingGetPresentation } from "../presenting/commands/get-pres
 import { handlePresentingChatEdit } from "../presenting/commands/chat-edit.js";
 import { handlePresentingParseDocument } from "../presenting/commands/parse-document.js";
 import { handlePresentingExportPresentation } from "../presenting/commands/export-presentation.js";
-import { handlePresentingEditSlide } from "../presenting/commands/edit-slide.js";
-import { handlePresentingImportTemplate } from "../presenting/commands/import-template.js";
-import { handlePresentingListImportedTemplates } from "../presenting/commands/list-imported-templates.js";
-import { handlePresentingDeleteImportedTemplate } from "../presenting/commands/delete-imported-template.js";
 import { handlePresentingRestoreSlide } from "../presenting/commands/restore-slide.js";
 
 // ── Settings handlers ──────────────────────────────────────────────────────
@@ -275,22 +271,6 @@ export function createHandler(deps: HandlerDependencies): (cmd: Command) => Prom
 
 		case "presenting_export_presentation":
 			await handlePresentingExportPresentation(cmd as any);
-			break;
-
-		case "presenting_edit_slide":
-			await handlePresentingEditSlide(deps, cmd as any);
-			break;
-
-		case "presenting_import_template":
-			await handlePresentingImportTemplate(deps, cmd as any);
-			break;
-
-		case "presenting_list_imported_templates":
-			await handlePresentingListImportedTemplates(deps, cmd as any);
-			break;
-
-		case "presenting_delete_imported_template":
-			await handlePresentingDeleteImportedTemplate(deps, cmd as any);
 			break;
 
 		case "presenting_restore_slide":

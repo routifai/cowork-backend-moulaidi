@@ -24,10 +24,6 @@ export function presentingEngineRoot(): string {
 	return join(BACKEND_ROOT, "presenting", "engine");
 }
 
-export function templatesDir(): string {
-	return join(presentingEngineRoot(), "templates");
-}
-
 export function exportRuntimeDir(): string {
 	const fromEnv = process.env.EXPORT_RUNTIME_DIR;
 	if (fromEnv && existsSync(fromEnv)) return fromEnv;

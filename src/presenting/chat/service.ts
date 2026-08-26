@@ -43,7 +43,6 @@ export class PresentationChatService {
   private readonly _conversationId: string | null;
   private readonly _provider: string;
   private readonly _model: string;
-  private readonly _presentationType: string;
   private readonly _memory: PresentationContextStore;
   private readonly _tools: ChatTools;
   private readonly _modelRuntime: any;
@@ -54,24 +53,17 @@ export class PresentationChatService {
     conversationId?: string | null;
     provider: string;
     model: string;
-    presentationType?: string;
     modelRuntime: any;
     modelRegistry: any;
     chatMode?: ChatToolMode;
-    hypatiaDir: string;
-    workspaceCwd: string;
   }) {
     this._presentationId = opts.presentationId;
     this._conversationId = opts.conversationId ?? null;
     this._provider = opts.provider;
     this._model = opts.model;
-    this._presentationType = opts.presentationType === "smart" ? "smart" : "standard";
     this._modelRuntime = opts.modelRuntime;
     this._modelRegistry = opts.modelRegistry;
-    this._memory = new PresentationContextStore(this._presentationId, this._presentationType, {
-      hypatiaDir: opts.hypatiaDir,
-      workspaceCwd: opts.workspaceCwd,
-    });
+    this._memory = new PresentationContextStore(this._presentationId);
     this._tools = new ChatTools(this._memory, opts.chatMode ?? "presentation");
   }
 
@@ -92,8 +84,8 @@ export class PresentationChatService {
     const db = getDb();
     const presentation = db.prepare("SELECT id, generation_mode, language FROM presentations WHERE id = ?").get(this._presentationId) as any;
     if (!presentation) throw new PresentationNotFoundError("Presentation not found");
-    if (presentation.generation_mode !== this._presentationType) {
-      throw new Error("Presentation type does not match the stored generation mode.");
+    if (presentation.generation_mode !== "smart") {
+      throw new Error("Presentation is not a Smart-mode deck.");
     }
 
     const conversationId = ensureConversationId(this._presentationId, this._conversationId);
@@ -115,7 +107,7 @@ export class PresentationChatService {
 
     const presentationMemory = await this._memory.retrieveContext(normalizedUserMessage || userMessage);
     const chatMemory = await retrieveSemanticContext(this._presentationId, conversationId, normalizedUserMessage || userMessage);
-    const systemPrompt = buildSystemPrompt(presentationMemory, chatMemory, this._presentationType);
+    const systemPrompt = buildSystemPrompt(presentationMemory, chatMemory);
     const composedUserMessage = composeUserMessageForModel(userMessage || "Please use the attached document(s).", attachmentContext);
 
     const messages: Array<Record<string, unknown>> = [

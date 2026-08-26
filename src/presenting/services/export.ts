@@ -4,8 +4,10 @@
  * The actual export orchestration lives in native-pptx-export.ts — this
  * file just loads the presentation from the DB and hands its slides' HTML
  * over. Every slide is a Smart-mode HTML fragment; native-pptx-export.ts
- * screenshots each one via smart-slide-render.ts and assembles the deck as
- * one pptx-from-json call.
+ * wraps the whole deck in Presenton's own real export-page DOM structure
+ * and hands it to their own `@presenton/export-core` package's
+ * `html-to-any` task — their real conversion pipeline, not a
+ * reimplementation of it.
  */
 
 import { ExportRuntimeError, resolveExportRuntime } from "./export-runtime.js";

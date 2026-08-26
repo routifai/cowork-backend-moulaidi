@@ -172,70 +172,103 @@ context-injection in `sendChat()` just works unmodified.
 
 ## 6. Export
 
-Smart slides have no constrained schema to map to real pptx shapes — an
-LLM can emit arbitrary Tailwind/Chart.js markup, so (for now) every Smart
-slide exports as **one full-bleed raster picture**, same tier as
-"unsupported content" in the TemplateV2 native-export path.
+Smart slides have no constrained schema to map to real pptx shapes — an LLM
+emits arbitrary Tailwind/Chart.js markup, not a known JSON tree. Export
+does **not** reimplement a DOM→shapes conversion on our side — it wraps the
+whole deck in Presenton's own real export-page DOM structure and hands it
+to their own `@presenton/export-core` package's `html-to-any` task, which
+runs their actual production conversion pipeline (the same one their app
+uses) and returns a real `.pptx`. Two earlier versions of this file existed
+this session and were both replaced:
 
-**File:** `src/presenting/services/smart-slide-render.ts` — wraps the slide
-HTML in the same Tailwind/Chart.js CDN scaffold the frontend uses, loads it
-in the vendored Chromium via `puppeteer-core` (not the vendored runtime's
-own `html-to-image` task type — that only accepts a *complete* HTML
-document and doesn't give a hook to wait for CDN scripts + a Chart.js paint
-tick), screenshots it, and hands that PNG to `pptx-from-json` as a
-`picture` shape.
+1. A raster-only version (one full-bleed screenshot per slide, no editable
+   text at all).
+2. A custom DOM-extraction version (`smart-dom-extractor.ts` +
+   `smart-shape-mapper.ts`, both deleted) that walked the rendered DOM
+   itself and mapped leaves to `pptx-from-json` shapes directly — real
+   editable text, but far more conservative than Presenton's own pipeline:
+   any gradient background or chart sent the *whole slide* to raster (later
+   improved to per-element raster, still worse than just using their real
+   pipeline). Verified head-to-head against the same gradient-heavy sample
+   deck: the custom extractor exported 0 fully-native slides where
+   Presenton's real pipeline exported editable text on every slide, with
+   only 2-3 small rasterized decorative elements per slide (see below).
 
-This reuses infrastructure built the same session for TemplateV2's own
-native export path — worth understanding since "generating these slides"
-really means the whole pipeline end to end:
+**Files:**
+- `smart-slide-render.ts` — `wrapSmartDeckHtml(sections: string[])`. Ports
+  Presenton's real `servers/nextjs/app/(export)/pdf-maker/PdfMakerPage.tsx`
+  (genuinely open source, not obfuscated — unlike export-core itself) DOM
+  structure field-for-field: an `#presentation-slides-wrapper` containing
+  one `.main-slide` per slide, each holding `.slide-export-inner` >
+  `smart-slide-export-root` > `smart-slide-export-content` > the raw
+  `<section>` HTML, plus their exact `PDF_PRINT_STYLE` sizing rules
+  (`1280x720` fixed `.main-slide`, flex-column stacking, no gaps/margins).
+  This isn't cosmetic — `html-to-any`'s handler specifically looks for
+  `#presentation-slides-wrapper` and throws `"Presentation slides wrapper
+  not found"` (HTTP 400) without it. Confirmed by testing a bare single
+  `<section>` first (fails with that exact error) before finding and
+  porting the real wrapper.
+- `export-runtime.ts` — `runHtmlToAnyPptxTask(html, title, runtime,
+  tempDir)` calls `{type: "html-to-any", html, format: "pptx", title}`
+  against the vendored package.
+- `native-pptx-export.ts` — `exportPresentationNatively()`, now just: wrap
+  every slide's HTML, call `runHtmlToAnyPptxTask()` once for the whole
+  deck, copy the result to the output path. No browser management, no
+  per-slide loop, no leaf classification on our side at all.
 
-### The native (non-raster) TemplateV2 export path
+**Vendored runtime.** `export-runtime.ts` dynamically `import()`s
+`@presenton/export-core`
+(`presenting/engine/vendor/presentation-export/node_modules/`) and calls
+its typed `runTask()` in-process — no subprocess, no task-file/response-file
+protocol. This replaced an earlier vendored runtime (Presenton's old
+Electron-era export pipeline, pinned at `v0.4.8`) that shelled out to a
+frozen Python binary (PyInstaller) via exactly that subprocess protocol.
+Confirmed `v0.4.8` was the last release in that lineage — no newer
+platform build exists — and that Presenton's real current pipeline is this
+package: a full rewrite, pure TypeScript, "Python is not required" per its
+own README. It's fetched from `https://github.com/presenton/presenton-export`
+release tarballs (see `sync-presentation-export.mjs`) rather than the npm
+registry — publicly downloadable, but still run through
+`javascript-obfuscator` (a real devDependency of the package). Reading its
+actual DOM→shapes conversion logic (to find the real `PptxAutoShapeBoxModel`/
+`PptxTextBoxModel`/`PptxFontModel` schema, and to root-cause the
+`html-to-any` wrapper requirement) meant downloading the release tarball
+and beautifying the obfuscated bundle by hand, not `npm view`-ing readable
+source.
 
-**Files:** `dom-slide-renderer.ts`, `dom-layout-resolver.ts`,
-`slide-to-pptx-shapes.ts`, `native-pptx-export.ts`.
+**Two real quirks found and fixed along the way** (both from directly
+testing the vendored binary, not from assumption):
 
-A TemplateV2 slide's `ui` tree gets rendered as *real* HTML/CSS (flexbox for
-`flex`, CSS grid for `grid`, real font properties for `text`) instead of
-approximating the layout in JS. That HTML is loaded in the vendored
-Chromium via `puppeteer-core`, and every marked leaf element's
-`getBoundingClientRect()` is read back — so text wrap points, flex/grid
-positions etc. come from a *real* layout engine, not a JS heuristic. Those
-exact positions become `pptx-from-json` shapes (`textbox`/`picture`/
-`autoshape`), producing genuinely editable text in the exported `.pptx`.
+1. **`page.evaluate(fn)` breaks under this repo's esbuild build** — hit
+   during the now-deleted custom-extractor version, but worth keeping as a
+   documented gotcha since it'll resurface for any future `page.evaluate`
+   use in this codebase. Passing a live function reference (rather than a
+   string) throws `ReferenceError: __name is not defined` — both `tsx`
+   (dev) and `pnpm run bundle` (prod) inject esbuild's name-preservation
+   helper (`__name(fn, "fn")`) into transpiled functions, and that helper
+   only exists in the calling module's scope, not in the re-evaluated
+   string Puppeteer serializes via `Function.prototype.toString()`. Fix:
+   stringify the function and wrap it with a local
+   `function __name(fn){return fn}` shim before `page.evaluate()`.
+2. **`autoshape.border_radius` is a real, typed schema field that doesn't
+   render** — found while the custom extractor was still in use: their own
+   code emits it, but the resulting shape's `<a:prstGeom>` stayed `"rect"`,
+   never `"roundRect"`, no error either way. Moot now that export goes
+   through their real `html-to-any` pipeline instead of us hand-building
+   `pptx-from-json` shapes ourselves — whatever their pipeline does with
+   rounded corners internally (screenshot the element, approximate it,
+   accept the gap) is now exactly what ships, not a second-guessed
+   reimplementation of it.
 
-Native shape support is intentionally narrow in v1: `text`, `text-list`,
-`image`, and *unrotated, unstroked, axis-aligned-rectangle* `vector`
-elements (characterized via forced-pydantic-error probing against the
-frozen `convert-darwin-arm64` binary — `autoshape` only supports
-`shape_type`/`position`/`fill.color`, no stroke, no corner radius, no
-rotation). Anything else on a slide (charts, tables, non-rect/stroked/
-rotated vectors, filled containers, svg, infographic, an unresolvable image
-source) makes that *whole slide* fall back to the pre-existing raster
-`json-to-image` path — never a partial/broken native render.
-
-Two real, non-obvious bugs found and fixed while building this (both via
-directly testing the frozen `pptx-from-json` binary, not by reading docs —
-there are none):
-
-1. **Position offset keys are `left`/`top`, not `x`/`y`.** The first
-   attempt used `{x, y, width, height}` (matching how `position`/`size` are
-   split everywhere else in this codebase) and every shape silently landed
-   at `(0,0)` — unrecognized fields are dropped, not rejected, so this
-   produced no error at all. Caught by testing a deliberately non-zero
-   position and reading the real output back with `python-pptx`.
-2. **Two concurrent Chromium instances hang.** Running this session's own
-   `puppeteer-core`-driven Chromium for DOM readback *while also* calling
-   the vendored runtime's raster fallback (which spawns its *own* separate
-   Chromium via `runExportTask`) deadlocks. Fixed by splitting into two
-   passes — resolve every slide's native geometry first with one shared
-   browser, close it, *then* render whatever fell back to raster.
-
-All slides (native shapes + raster-fallback pictures + Smart-mode raster
-pictures) are assembled into **one single `pptx-from-json` call** — the
-whole deck is one real python-pptx-built file, not a mix of a hand-rolled
-OOXML writer and something else. The old hand-rolled ZIP writer
-(`assemble-pptx.ts`) is still in the tree as an unused fallback reference —
-nothing calls it anymore.
+Verified end-to-end against the real bundled sample deck that originally
+exposed the custom extractor's weakness
+(`presenting/smart-examples/arcade-sys-a-history-of-the-coin-op-era.json`,
+a CRT/gradient-heavy visual style — every slide has a gradient background):
+every slide now exports 7-8 real `AUTO_SHAPE`/text shapes plus only 2-3
+`PICTURE` shapes for genuinely irreducible decorative elements (the
+gradient background, a CRT bezel graphic) — not one full-slide raster
+picture. Confirmed with `python-pptx` against the real output file, not
+assumed from the task response alone.
 
 ## 7. Edit compare/keep ("Select edits")
 
@@ -262,10 +295,14 @@ shown).
 
 ## Known limitations (honest, not yet fixed)
 
-- **Smart export is always raster.** No native (editable-text) export path
-  for arbitrary Smart HTML — would need per-element semantic tagging
-  (which DOM nodes are text vs. decoration vs. chart) that the current
-  generation/edit prompts don't produce.
+- **Native-export fidelity is now entirely Presenton's own, not ours to
+  tune.** Since §6's rewrite, export goes through their real `html-to-any`
+  pipeline rather than a custom DOM-extraction/shape-mapping layer — so
+  whatever their pipeline does or doesn't natively represent (rounded
+  corners, gradients, per-run bold/italic mixing) is exactly what ships.
+  We no longer control or can easily improve that fidelity on our side; the
+  only lever left is the DOM/HTML we hand them (`wrapSmartDeckHtml()`), not
+  a shape-mapping layer to extend.
 - **Requires internet.** Tailwind + Chart.js load from CDN for both the
   live iframe preview and the export screenshot. No offline bundle.
 - **No design-reference input.** Presenton's own Smart mode can anchor

@@ -1,44 +1,51 @@
 #!/usr/bin/env node
 /**
- * Fetches the vendored `presentation-export` runtime (proprietary, per the
- * deliberately-confirmed exception — see hypatia-backend/docs/adr/ and the
- * Phase 5 plan notes) and its Chromium dependency, into
- * presenting/engine/vendor/presentation-export/.
+ * Installs the vendored `@presenton/export-core` package (real npm package,
+ * distributed as a GitHub Release tarball rather than through the npm
+ * registry — see https://github.com/presenton/presenton-export) into
+ * presenting/engine/vendor/presentation-export/, plus its Chromium
+ * dependency.
  *
- * Modeled on presenton's own electron/scripts/{sync-export-runtime.cjs,
- * prepare-export-chromium.cjs} — NOT its Dockerfile, which is Linux-only and
- * misses per-platform asset resolution entirely (see the Phase 5 plan notes
- * for why that distinction matters for a cross-platform Tauri app).
+ * This replaces an earlier vendored runtime: presenton's old Electron-era
+ * export pipeline (pinned at v0.4.8) shelled out to a frozen Python binary
+ * (PyInstaller, `py/convert-<platform>-<arch>`) via a subprocess/task-file
+ * protocol. Presenton has since rewritten that pipeline as this pure
+ * TypeScript/JS package (confirmed via its own package.json: "Python is not
+ * required") with a plain typed `runTask()` function export — no python, no
+ * subprocess protocol, just an in-process import. v0.4.8 was confirmed to be
+ * the last release in that old lineage (no newer platform-zip release
+ * exists); this package is the intended replacement, not a parallel option.
+ *
+ * The "opensource" edition (this script installs) omits the "quality" knob
+ * on `export`/`html-to-any` tasks (always low-quality for those two task
+ * types) but was empirically confirmed (via a real rich-shape probe against
+ * both the old and new binaries, comparing python-pptx-inspected output) to
+ * fully support `pptx-from-json` — the only task type this codebase uses —
+ * including fill/stroke/shadow/bold/underline. One real limitation carried
+ * over unchanged from the old binary: `autoshape.border_radius` is read by
+ * the package's own conversion code but does not actually render a rounded
+ * shape in the output .pptx in either edition — smart-dom-extractor.ts
+ * still treats a rounded background as unsupported (raster fallback) for
+ * that reason, not because this vendoring is incomplete.
  *
  * Usage: node vendor/sync-presentation-export.mjs [--force]
- *
- * What this does NOT do (deliberately, for now — see export_runtime_service.py):
- *   - Apply presenton's `networkidle0` -> `domcontentloaded` patch: confirmed
- *     by inspecting the actual downloaded v0.4.8 build that it already uses
- *     `waitUntil:"load"` for HTML-to-image rendering, so that patch's target
- *     string doesn't exist in this build and isn't needed.
- *   - The macOS App-Store codesign/framework-symlink normalization from
- *     presenton's prepare-export-chromium.cjs — that's Electron-packaging-
- *     specific hardening; Tauri's own bundler has different requirements,
- *     revisit in Phase 9 if actually needed.
  */
 
 import fs from "node:fs";
 import https from "node:https";
 import path from "node:path";
-import { execFileSync, execSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const vendorRoot = __dirname;
 const exportDir = path.join(vendorRoot, "presentation-export");
-const pyDir = path.join(exportDir, "py");
 const cacheDir = path.join(vendorRoot, ".cache", "export-runtime");
 
-// Pinned to match presenton's own electron/package.json exactly — same
-// release, same Chromium build ids, so behavior matches their tested combo.
-const EXPORT_VERSION = "v0.4.8";
-const EXPORT_REPO_BASE = "https://github.com/presenton/presenton-export/releases/download";
+// Pinned to a specific @presenton/export-core opensource release. Bump
+// deliberately (not "latest") so behavior only changes when this file changes.
+const EXPORT_CORE_VERSION = "1.0.18";
+const EXPORT_CORE_TARBALL_URL = `https://github.com/presenton/presenton-export/releases/download/v${EXPORT_CORE_VERSION}/presenton-export-core-opensource-${EXPORT_CORE_VERSION}.tgz`;
 const CHROMIUM_BUILD_IDS = {
   "darwin-arm64": "1625085",
   "darwin-x64": "1625072",
@@ -46,16 +53,6 @@ const CHROMIUM_BUILD_IDS = {
 const CHROME_BUILD_ID = "149.0.7827.196"; // linux/win32 — Chrome for Testing, not Chromium
 
 const forceDownload = process.argv.includes("--force");
-
-function getPlatformAssetName() {
-  const platformArch = `${process.platform}-${process.arch}`;
-  if (platformArch === "linux-arm64") return "export-Linux-ARM64.zip";
-  if (platformArch === "linux-x64") return "export-Linux-X64.zip";
-  if (platformArch === "darwin-arm64") return "export-macOS-ARM64.zip";
-  if (platformArch === "darwin-x64") return "export-macOS-X64.zip";
-  if (platformArch === "win32-x64") return "export-Windows-X64.zip";
-  throw new Error(`Unsupported export runtime platform: ${platformArch}`);
-}
 
 function downloadFile(url, outputPath, redirects = 5) {
   return new Promise((resolve, reject) => {
@@ -77,60 +74,52 @@ function downloadFile(url, outputPath, redirects = 5) {
   });
 }
 
-function unzip(zipPath, destDir) {
-  fs.mkdirSync(destDir, { recursive: true });
-  if (process.platform === "win32") {
-    execFileSync("powershell.exe", [
-      "-NoProfile", "-Command",
-      `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
-    ], { stdio: "inherit" });
-    return;
-  }
-  execFileSync("unzip", ["-o", zipPath, "-d", destDir], { stdio: "inherit" });
-}
-
-async function syncExportRuntime() {
-  const indexPath = path.join(exportDir, "index.js");
-  const converterGlob = fs.existsSync(pyDir) ? fs.readdirSync(pyDir) : [];
-  const hasConverter = converterGlob.some((name) => name.startsWith("convert"));
-
-  if (!forceDownload && fs.existsSync(indexPath) && hasConverter) {
-    console.log("[sync] presentation-export runtime already present, skipping (use --force to re-fetch).");
-  } else {
-    const assetName = getPlatformAssetName();
-    const url = `${EXPORT_REPO_BASE}/${EXPORT_VERSION}/${assetName}`;
-    const zipPath = path.join(cacheDir, assetName);
-
-    console.log(`[sync] Downloading ${url}`);
-    await downloadFile(url, zipPath);
-
-    const extractDir = path.join(cacheDir, `extract-${Date.now()}`);
-    console.log(`[sync] Extracting to ${extractDir}`);
-    unzip(zipPath, extractDir);
-
-    fs.mkdirSync(exportDir, { recursive: true });
-    fs.mkdirSync(pyDir, { recursive: true });
-    for (const entry of fs.readdirSync(extractDir, { withFileTypes: true })) {
-      const from = path.join(extractDir, entry.name);
-      if (entry.name.startsWith("convert")) {
-        const to = path.join(pyDir, entry.name);
-        fs.cpSync(from, to);
-        if (process.platform !== "win32") fs.chmodSync(to, 0o755);
-      } else {
-        fs.cpSync(from, path.join(exportDir, entry.name), { recursive: true });
-      }
+async function syncExportCore() {
+  const installedPkgJson = path.join(exportDir, "node_modules", "@presenton", "export-core", "package.json");
+  if (!forceDownload && fs.existsSync(installedPkgJson)) {
+    const installed = JSON.parse(fs.readFileSync(installedPkgJson, "utf-8"));
+    if (installed.version === EXPORT_CORE_VERSION) {
+      console.log(`[sync] @presenton/export-core@${EXPORT_CORE_VERSION} already installed, skipping (use --force to reinstall).`);
+      return;
     }
-    fs.rmSync(extractDir, { recursive: true, force: true });
-    console.log("[sync] presentation-export runtime installed.");
   }
 
-  // `sharp` is an external peer dependency of index.js (not bundled in the
-  // minified build) — confirmed by hands-on testing (MODULE_NOT_FOUND
-  // without it), not documented anywhere in presenton's own scripts.
-  if (forceDownload || !fs.existsSync(path.join(exportDir, "node_modules", "sharp"))) {
-    console.log("[sync] Installing sharp (required by index.js, not bundled)...");
-    execSync("npm install --no-audit --no-fund sharp", { cwd: exportDir, stdio: "inherit" });
+  const tarballPath = path.join(cacheDir, `export-core-opensource-${EXPORT_CORE_VERSION}.tgz`);
+  if (forceDownload || !fs.existsSync(tarballPath)) {
+    console.log(`[sync] Downloading ${EXPORT_CORE_TARBALL_URL}`);
+    await downloadFile(EXPORT_CORE_TARBALL_URL, tarballPath);
   }
+
+  fs.mkdirSync(exportDir, { recursive: true });
+  const pkgJsonPath = path.join(exportDir, "package.json");
+  fs.writeFileSync(
+    pkgJsonPath,
+    JSON.stringify(
+      {
+        name: "hypatia-presenting-engine-presentation-export-vendor",
+        private: true,
+        type: "module",
+        description: "Vendored @presenton/export-core (real npm package, GitHub-Release-tarball distributed) — see sync-presentation-export.mjs for why. node_modules/ is not committed, see .gitignore.",
+        dependencies: {
+          "@presenton/export-core": `file:${tarballPath}`,
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+
+  console.log(`[sync] Installing @presenton/export-core@${EXPORT_CORE_VERSION}...`);
+  execSync("npm install --no-audit --no-fund", {
+    cwd: exportDir,
+    stdio: "inherit",
+    // The package's own `puppeteer` dependency would otherwise try to
+    // download its own managed Chromium on install — redundant, since we
+    // vendor and pin our own Chromium build below and pass its
+    // executablePath into every runTask() call explicitly.
+    env: { ...process.env, PUPPETEER_SKIP_DOWNLOAD: "true" },
+  });
+  console.log("[sync] @presenton/export-core installed.");
 }
 
 async function syncChromium() {
@@ -168,13 +157,13 @@ async function syncChromium() {
 }
 
 async function main() {
-  await syncExportRuntime();
+  await syncExportCore();
 
   // @puppeteer/browsers is a build-time-only tool for fetching Chromium —
   // installed at this script's own level (vendor/), not inside
-  // presentation-export/ (that dir's node_modules is index.js's runtime
-  // dependency set, sharp only; dynamic import() resolves relative to this
-  // file's own directory, so it must live here to be importable below).
+  // presentation-export/ (that dir's node_modules is @presenton/export-core's
+  // own runtime dependency set). Dynamic import() below resolves relative to
+  // this file's own directory, so it must live here to be importable.
   const hasPuppeteerBrowsers = fs.existsSync(path.join(vendorRoot, "node_modules", "@puppeteer", "browsers"));
   if (!hasPuppeteerBrowsers) {
     console.log("[sync] Installing @puppeteer/browsers...");

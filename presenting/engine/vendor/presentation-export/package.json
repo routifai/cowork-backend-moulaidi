@@ -1,9 +1,9 @@
 {
   "name": "hypatia-presenting-engine-presentation-export-vendor",
   "private": true,
-  "description": "Vendored presentation-export runtime (proprietary, fetched by ../sync-presentation-export.mjs) plus its one real external dependency, sharp — index.js itself is not committed, see .gitignore.",
-  "type": "commonjs",
+  "type": "module",
+  "description": "Vendored @presenton/export-core (real npm package, GitHub-Release-tarball distributed) — see sync-presentation-export.mjs for why. node_modules/ is not committed, see .gitignore.",
   "dependencies": {
-    "sharp": "^0.35.3"
+    "@presenton/export-core": "file:/Users/simo/hypatia/hypatia-backend/presenting/engine/vendor/.cache/export-runtime/export-core-opensource-1.0.18.tgz"
   }
 }

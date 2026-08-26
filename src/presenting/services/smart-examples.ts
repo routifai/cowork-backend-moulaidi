@@ -57,14 +57,25 @@ export function listSmartExamples(): SmartExampleSummary[] {
 	}));
 }
 
-/** Read up to `maxSlides` of a bundled example's real slide HTML, for injecting into the Smart generation prompt as style-only reference context. Returns null if the id doesn't match a bundled example (never throws on a bad/stale client-supplied id). */
-export function getSmartExampleReferenceSlides(id: string, maxSlides = 2): { title: string; slides: string[] } | null {
+/**
+ * Read up to `maxSlides` of a bundled example's real slide HTML, for
+ * injecting into the Smart generation prompt as style-only reference
+ * context. `maxSlides` defaults to 6 to match Presenton's own
+ * `MAX_REFERENCE_SLIDES` (`community_presentations.py`) — one selected
+ * reference here is the same as Presenton's "one reference picked, up to 6
+ * of its slides used" case. Returns null if the id doesn't match a bundled
+ * example (never throws on a bad/stale client-supplied id).
+ */
+export function getSmartExampleReferenceSlides(
+	id: string,
+	maxSlides = 6,
+): { sourceId: number; title: string; slides: string[] } | null {
 	const manifest = readManifest();
 	const entry = manifest.find((e) => idFromFile(e.file) === id);
 	if (!entry) return null;
 	try {
 		const deck = JSON.parse(readFileSync(join(smartExamplesDir(), entry.file), "utf-8")) as SmartExampleDeck;
-		return { title: deck.title, slides: deck.slides.slice(0, maxSlides) };
+		return { sourceId: deck.source_id, title: deck.title, slides: deck.slides.slice(0, maxSlides) };
 	} catch {
 		return null;
 	}

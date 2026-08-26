@@ -11,10 +11,23 @@
  * Simplification vs. the original: no per-slide streaming/incremental
  * acceptance (hypatia's existing generation commands are all blocking
  * request/response — see start-generation.ts). One full-deck completion is
- * requested per attempt; on validation failure the whole deck is retried
- * with the failure appended as feedback, up to SMART_GENERATION_MAX_ATTEMPTS.
+ * requested per attempt.
+ *
+ * On a validation failure that's traceable to one specific slide
+ * (SmartGenerationError.slideIndex set), a targeted repair pass runs first
+ * (attemptTargetedRepair): a small tool-calling loop hands the model just
+ * that slide's HTML and the exact validation error, and the model calls
+ * `write_slide` with a minimal fix — not a full-deck regeneration. This
+ * exists because the naive fix (regenerate the whole deck from scratch on
+ * any failure) makes every validation miss cost a full ~55s generation
+ * call; a targeted single-slide fix is both cheaper and closer to how a
+ * human would actually fix it. Only when repair can't produce a valid
+ * result within its own small budget does the loop fall back to a full
+ * regeneration attempt (the original, always-correct safety net) — see
+ * SMART_GENERATION_MAX_ATTEMPTS.
  */
-import { extractText } from "../chat/llm-tool-types.js";
+import { Type } from "typebox";
+import { extractText, extractToolCalls } from "../chat/llm-tool-types.js";
 import { inspectSmartSlideLayout } from "./smart-slide-layout.js";
 
 export const DEFAULT_SMART_SLIDE_COUNT = 8;
@@ -43,9 +56,15 @@ export interface GeneratedSmartPresentation {
 }
 
 export class SmartGenerationError extends Error {
-  constructor(msg: string) {
+  /** Set when the failure is traceable to one specific slide — enables the targeted repair pass instead of a full-deck regeneration. */
+  slideIndex?: number;
+  /** Best-effort {title, slides} built up to the point of failure — lets the caller attempt a targeted repair instead of discarding everything and regenerating the whole deck. */
+  partial?: { title: string; slides: SmartSlide[] };
+  constructor(msg: string, opts?: { slideIndex?: number; partial?: { title: string; slides: SmartSlide[] } }) {
     super(msg);
     this.name = "SmartGenerationError";
+    this.slideIndex = opts?.slideIndex;
+    this.partial = opts?.partial;
   }
 }
 
@@ -429,9 +448,165 @@ function parseSmartPresentationHtml(
     throw new SmartGenerationError(`The model returned ${blocks.length} slides instead of ${opts.expected_slide_count}`);
   }
 
-  const slides = blocks.map((block, index) => slideFromHtml(block, index));
-  slides.forEach((slide, index) => validateSlidePosition(slide, index, opts));
-  return { title: titleMatch[1].trim(), slides };
+  const title = titleMatch[1].trim();
+  // Tolerant build: keep going past the first broken slide (a raw/unnormalized
+  // placeholder stands in for it) so a full best-effort {title, slides} can be
+  // attached to the thrown error — attemptTargetedRepair needs the *whole*
+  // deck, not just the one broken slide, to hand back a complete, valid result.
+  const slides: SmartSlide[] = [];
+  let firstError: SmartGenerationError | null = null;
+  for (let index = 0; index < blocks.length; index++) {
+    try {
+      slides.push(slideFromHtml(blocks[index], index));
+    } catch (err) {
+      const e = err instanceof SmartGenerationError ? err : new SmartGenerationError(String(err));
+      if (e.slideIndex === undefined) e.slideIndex = index;
+      if (!firstError) firstError = e;
+      slides.push({ title: `Slide ${index + 1}`, html: blocks[index], speaker_note: "", slide_type: "content" });
+    }
+  }
+  if (firstError) {
+    firstError.partial = { title, slides };
+    throw firstError;
+  }
+
+  for (let index = 0; index < slides.length; index++) {
+    try {
+      validateSlidePosition(slides[index], index, opts);
+    } catch (err) {
+      const e = err instanceof SmartGenerationError ? err : new SmartGenerationError(String(err));
+      if (e.slideIndex === undefined) e.slideIndex = index;
+      e.partial = { title, slides };
+      throw e;
+    }
+  }
+  return { title, slides };
+}
+
+// ── Targeted repair (single-slide fix, not a full-deck regeneration) ──────
+
+const REPAIR_MAX_ROUNDS = 4;
+
+const REPAIR_TOOLS = [
+  {
+    name: "read_slide",
+    description: "Read the current HTML of one slide by its 0-based index.",
+    parameters: Type.Object({ index: Type.Number({ description: "0-based slide index" }) }),
+  },
+  {
+    name: "write_slide",
+    description:
+      "Replace one slide's HTML with a corrected version. Make the smallest edit that fixes the stated problem — keep everything else about the slide (content, structure, style) unchanged. Do not regenerate the slide from scratch.",
+    parameters: Type.Object({
+      index: Type.Number({ description: "0-based slide index" }),
+      html: Type.String({ description: "The corrected full <section>...</section> HTML for this slide" }),
+    }),
+  },
+];
+
+/**
+ * Fixes exactly one broken slide via a small tool-calling loop instead of
+ * regenerating the whole deck. Returns null (caller should fall back to a
+ * full regeneration attempt) if the model can't produce a valid slide
+ * within REPAIR_MAX_ROUNDS, or if the failure isn't traceable to one slide
+ * (SmartGenerationError.slideIndex/partial unset — a deck-structural
+ * problem like the wrong slide count, which a single-slide edit can't fix).
+ */
+export async function attemptTargetedRepair(
+  deps: { modelRuntime: any; modelRegistry: any },
+  found: unknown,
+  error: SmartGenerationError,
+  opts: { include_title_slide: boolean; include_table_of_contents: boolean },
+): Promise<GeneratedSmartPresentation | null> {
+  if (error.slideIndex === undefined || !error.partial) return null;
+  const { title, slides: originalSlides } = error.partial;
+  if (error.slideIndex >= originalSlides.length) return null;
+  const slides = originalSlides.map((s) => ({ ...s }));
+  const targetIndex = error.slideIndex;
+  let targetRepaired = false;
+
+  const systemPrompt =
+    "You are fixing ONE broken slide in an already-generated presentation. " +
+    "You will be told exactly what is wrong. Use `read_slide` if you need to see the current HTML, " +
+    "then call `write_slide` with a corrected version of THAT SAME slide. " +
+    "Make the smallest possible edit that fixes the stated problem — do not rewrite the slide from scratch, " +
+    "and do not touch any other slide. Stop calling tools once the fix is submitted.";
+
+  const messages: Array<Record<string, unknown>> = [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `Slide ${targetIndex + 1} (0-based index ${targetIndex}) failed validation:\n${error.message}\n\nCurrent HTML:\n${slides[targetIndex].html}\n\nFix only this slide.`,
+        },
+      ],
+    },
+  ];
+
+  for (let round = 0; round < REPAIR_MAX_ROUNDS; round++) {
+    const assistantMessage = await deps.modelRuntime.completeSimple(found, {
+      systemPrompt,
+      messages,
+      tools: REPAIR_TOOLS,
+    });
+
+    const toolCalls = extractToolCalls(assistantMessage);
+    if (!toolCalls.length) break; // model believes the fix is done
+
+    messages.push(assistantMessage as unknown as Record<string, unknown>);
+    for (const toolCall of toolCalls) {
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(toolCall.arguments);
+      } catch {
+        /* leave empty */
+      }
+      let resultText: string;
+      let isError = false;
+      const index = Number(args.index);
+      if (!Number.isInteger(index) || index < 0 || index >= slides.length) {
+        resultText = `No slide at index ${String(args.index)}.`;
+        isError = true;
+      } else if (toolCall.name === "read_slide") {
+        resultText = slides[index].html;
+      } else if (toolCall.name === "write_slide") {
+        try {
+          slides[index] = slideFromHtml(String(args.html ?? ""), index);
+          if (index === targetIndex) targetRepaired = true;
+          resultText = "Slide updated and passed validation.";
+        } catch (err) {
+          resultText = err instanceof Error ? err.message : String(err);
+          isError = true;
+        }
+      } else {
+        resultText = `Unknown tool ${toolCall.name}`;
+        isError = true;
+      }
+      messages.push({
+        role: "toolResult",
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        content: [{ type: "text", text: resultText }],
+        isError,
+      });
+    }
+  }
+
+  // The model may stop calling tools without ever successfully repairing the
+  // target slide (e.g. every write_slide attempt still failed validation) —
+  // in that case slides[targetIndex] is still the original broken/raw HTML.
+  // Never treat that as success.
+  if (!targetRepaired) return null;
+
+  // Single-slide re-validation (inside write_slide, above) doesn't catch
+  // cross-slide constraints — re-check those now that repair has stopped.
+  try {
+    slides.forEach((slide, index) => validateSlidePosition(slide, index, opts));
+  } catch {
+    return null;
+  }
+  return { title, slides };
 }
 
 // ── Orchestration ────────────────────────────────────────────────────────
@@ -498,6 +673,19 @@ export async function generateSmartPresentation(
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       retryError = lastError.message;
+
+      // A failure traceable to one slide gets a cheap, targeted fix attempt
+      // first (a small tool-calling loop editing just that slide) instead of
+      // immediately paying for a full-deck regeneration. Only falls through
+      // to the regeneration retry below if repair can't produce a valid
+      // result within its own small budget.
+      if (err instanceof SmartGenerationError && err.slideIndex !== undefined && err.partial) {
+        const repaired = await attemptTargetedRepair(deps, found, err, {
+          include_title_slide: includeTitleSlide,
+          include_table_of_contents: includeToc,
+        });
+        if (repaired) return repaired;
+      }
     }
   }
 

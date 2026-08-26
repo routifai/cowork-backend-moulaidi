@@ -2,25 +2,23 @@
  * Presentation export: persisted slides -> .pptx file.
  * Port of presenting/engine/services/export.py + export_runtime_service.py.
  *
- * Renders each slide to a PNG via the vendored presentation-export runtime
- * (Chromium/Puppeteer), then packs those images into a .pptx in-process
- * (one full-bleed picture per slide — same shape as the old python-pptx
- * assembler, no Python).
- *
- * This is a visually faithful export — text is embedded in images, not
- * natively selectable in PowerPoint. Editing happens in Hypatia before export.
+ * The actual native/raster orchestration lives in native-pptx-export.ts —
+ * this file loads the presentation from the DB and hands its slides over.
+ * `renderSlideToImage` (below) is the one piece native-pptx-export.ts
+ * reuses directly: rendering a slide's `ui` JSON to a full-bleed PNG via the
+ * vendored runtime's Chromium, used as the per-slide fallback whenever a
+ * slide has content the native (real, editable-shapes) path doesn't support
+ * yet — see dom-slide-renderer.ts's header for exactly what that excludes.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
-import { assemblePptxFromImages } from "./assemble-pptx.js";
+import { existsSync, readFileSync } from "fs";
 import {
   ExportRuntimeError,
   resolveExportRuntime,
   runExportTask,
   type ExportRuntimeHandle,
 } from "./export-runtime.js";
+import { exportPresentationNatively } from "./native-pptx-export.js";
 
 const SLIDE_WIDTH_PX = 1280;
 const SLIDE_HEIGHT_PX = 720;
@@ -63,7 +61,7 @@ function guessMimeType(path: string): string {
   return map[ext] ?? "application/octet-stream";
 }
 
-async function renderSlideToImage(slideUi: unknown, runtime: ExportRuntimeHandle, tempDir: string): Promise<string> {
+export async function renderSlideToImage(slideUi: unknown, runtime: ExportRuntimeHandle, tempDir: string): Promise<string> {
   const taskPayload = {
     type: "json-to-image",
     layout: localizeImageDataUris(slideUi),
@@ -75,15 +73,6 @@ async function renderSlideToImage(slideUi: unknown, runtime: ExportRuntimeHandle
   const imagePath = String(response.file_path ?? response.imagePath ?? response.image_path ?? "");
   if (!imagePath || !existsSync(imagePath)) throw new ExportRuntimeError("Export runtime did not produce an image file.");
   return imagePath;
-}
-
-function assemblePptx(imagePaths: string[], outputPath: string, title: string): void {
-  try {
-    assemblePptxFromImages(imagePaths, outputPath, title);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new ExportRuntimeError(`PPTX assembly failed: ${message.slice(0, 400)}`);
-  }
 }
 
 export async function exportPresentationToPptx(opts: {
@@ -101,18 +90,21 @@ export async function exportPresentationToPptx(opts: {
 
   const runtime = resolveExportRuntime();
 
-  const tempDir = mkdtempSync(join(tmpdir(), "pres-export-"));
-  try {
-    const imagePaths: string[] = [];
-    for (const slide of slides) {
-      const ui = slide.ui ? JSON.parse(slide.ui) as unknown : null;
-      if (!ui) throw new PresentationNotFoundForExportError(`Slide at index ${slide.slide_index} has no rendered UI to export`);
-      const imagePath = await renderSlideToImage(ui, runtime, tempDir);
-      imagePaths.push(imagePath);
+  const exportSlides = slides.map((slide) => {
+    if (presentation.generation_mode === "smart") {
+      if (!slide.html_content) throw new PresentationNotFoundForExportError(`Smart slide at index ${slide.slide_index} has no HTML to export`);
+      return { ui: null, htmlContent: String(slide.html_content) };
     }
-    assemblePptx(imagePaths, opts.outputPath, String(presentation.title ?? ""));
-  } finally {
-    try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
+    const ui = slide.ui ? (JSON.parse(slide.ui) as unknown) : null;
+    if (!ui) throw new PresentationNotFoundForExportError(`Slide at index ${slide.slide_index} has no rendered UI to export`);
+    return { ui, htmlContent: null };
+  });
+
+  await exportPresentationNatively({
+    title: String(presentation.title ?? ""),
+    slides: exportSlides,
+    runtime,
+    outputPath: opts.outputPath,
+  });
   return opts.outputPath;
 }

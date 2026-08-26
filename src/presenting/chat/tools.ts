@@ -359,16 +359,12 @@ export class ChatTools {
 
   private async _saveSlide(args: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (this._memory.presentationType === "smart") {
-      // Smart slide: just save the HTML
-      const html = String(args.html ?? "");
-      const index = Number(args.index ?? 0);
-      const replaceOldSlideAtIndex = Boolean(args.replaceOldSlideAtIndex ?? false);
-      // Stored as content = { html }
       return this._memory.saveSlide({
-        content: { html },
-        layoutId: "__smart_slide__",
-        index,
-        replaceOldSlideAtIndex,
+        content: {},
+        layoutId: "",
+        html: String(args.html ?? ""),
+        index: Number(args.index ?? 0),
+        replaceOldSlideAtIndex: Boolean(args.replaceOldSlideAtIndex ?? false),
       });
     }
     const rawContent = args.content ?? "{}";

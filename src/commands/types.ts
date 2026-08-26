@@ -384,6 +384,20 @@ export interface PresentingEditSlideCommand {
 	args?: Record<string, unknown>;
 }
 
+/** Restores one slide's raw stored state (a snapshot captured client-side before a chat edit) — a direct DB write, no LLM involved. Powers the "keep original / keep edit" comparison after a chat turn. */
+export interface PresentingRestoreSlideCommand {
+	type: "presenting_restore_slide";
+	id: string;
+	presentationId: string;
+	index: number;
+	snapshot: {
+		htmlContent?: string | null;
+		content?: Record<string, unknown> | null;
+		ui?: unknown | null;
+		speakerNote?: string | null;
+	};
+}
+
 export interface PresentingChatAttachment {
 	name?: string;
 	filePath: string;
@@ -478,4 +492,5 @@ export type Command =
 	| PresentingEditSlideCommand
 	| PresentingImportTemplateCommand
 	| PresentingListImportedTemplatesCommand
-	| PresentingDeleteImportedTemplateCommand;
+	| PresentingDeleteImportedTemplateCommand
+	| PresentingRestoreSlideCommand;

@@ -45,6 +45,7 @@ import { MAX_NUMBER_OF_SLIDES } from "../utils/models.js";
 import { DEFAULT_ICON_WEIGHT } from "../utils/icon-weights.js";
 import { filesystemImagePathToAppDataUrl } from "../utils/asset-directory-utils.js";
 import { PRESENTATION_MEMORY_SERVICE } from "../services/memory-layer.js";
+import { normalizeSmartSlideHtml, SmartGenerationError } from "../services/smart-generation.js";
 
 const BLANK_SLIDE_LAYOUT_ID = "__blank_slide__";
 const MAX_SCHEMA_ERRORS = 10;
@@ -77,21 +78,22 @@ function parseJson<T>(raw: string | null | undefined, fallback: T): T {
 
 function saveSlideDb(presentationId: string, slide: {
   id?: string; layout?: string; layoutGroup?: string; index: number;
-  content: Record<string, unknown>; ui?: unknown; speakerNote?: string | null;
+  content: Record<string, unknown>; ui?: unknown; speakerNote?: string | null; htmlContent?: string | null;
 }, replace: boolean): void {
   const db = getDb();
   const id = slide.id ?? uuidv4();
   const content = JSON.stringify(slide.content);
   const ui = slide.ui != null ? JSON.stringify(slide.ui) : null;
+  const htmlContent = slide.htmlContent ?? null;
   if (replace) {
-    db.prepare("UPDATE slides SET id=?, layout=?, layout_group=?, content=?, ui=?, speaker_note=? WHERE presentation_id=? AND slide_index=?")
-      .run(id, slide.layout ?? "", slide.layoutGroup ?? "", content, ui, slide.speakerNote ?? null, presentationId, slide.index);
+    db.prepare("UPDATE slides SET id=?, layout=?, layout_group=?, content=?, ui=?, html_content=?, speaker_note=? WHERE presentation_id=? AND slide_index=?")
+      .run(id, slide.layout ?? "", slide.layoutGroup ?? "", content, ui, htmlContent, slide.speakerNote ?? null, presentationId, slide.index);
   } else {
     // Shift existing slides at >= index up
     db.prepare("UPDATE slides SET slide_index = slide_index + 1 WHERE presentation_id = ? AND slide_index >= ?")
       .run(presentationId, slide.index);
-    db.prepare("INSERT INTO slides (id, presentation_id, layout_group, layout, slide_index, content, ui, speaker_note) VALUES (?,?,?,?,?,?,?,?)")
-      .run(id, presentationId, slide.layoutGroup ?? "", slide.layout ?? "", slide.index, content, ui, slide.speakerNote ?? null);
+    db.prepare("INSERT INTO slides (id, presentation_id, layout_group, layout, slide_index, content, ui, html_content, speaker_note) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(id, presentationId, slide.layoutGroup ?? "", slide.layout ?? "", slide.index, content, ui, htmlContent, slide.speakerNote ?? null);
   }
 }
 
@@ -200,6 +202,17 @@ export class PresentationContextStore {
   async getSlideAtIndex(index: number, includeFullContent = false): Promise<Record<string, unknown> | null> {
     const slide = getSlideByIndex(this.presentationId, index);
     if (!slide) return null;
+
+    if (this.presentationType === "smart") {
+      const html = String(slide.html_content ?? "");
+      return {
+        slide_id: slide.id, index: slide.slide_index, slide_number: slide.slide_index + 1,
+        slide_type: slide.layout ?? null, speaker_note: slide.speaker_note ?? null,
+        html: includeFullContent ? html : undefined,
+        html_preview: includeFullContent ? undefined : html.slice(0, 400),
+      };
+    }
+
     const content = parseJson<Record<string, unknown>>(slide.content, {});
     const ui = parseJson<Record<string, unknown> | null>(slide.ui, null);
     const response: Record<string, unknown> = {
@@ -411,9 +424,14 @@ export class PresentationContextStore {
     layoutId: string;
     index: number;
     replaceOldSlideAtIndex: boolean;
+    html?: string;
   }): Promise<Record<string, unknown>> {
     const presentation = getPresentation(this.presentationId);
     if (!presentation) return { saved: false, message: "Presentation not found.", validation_errors: [] };
+
+    if (this.presentationType === "smart") {
+      return this.saveSmartSlideHtml(opts.html ?? "", opts.index, opts.replaceOldSlideAtIndex);
+    }
 
     const rawLayout = this.getLayoutById(opts.layoutId);
     if (!rawLayout) return { saved: false, message: `Layout '${opts.layoutId}' not found.`, validation_errors: [`Unknown layout_id '${opts.layoutId}'.`] };
@@ -464,6 +482,42 @@ export class PresentationContextStore {
       id: newId, layout: opts.layoutId, layoutGroup: templateId,
       index: insertIndex, content: newContent, ui,
       speakerNote: extractSpeakerNote(newContent),
+    }, false);
+    return { saved: true, action: "created", message: `New slide saved at index ${insertIndex}.`, slide_id: newId, index: insertIndex };
+  }
+
+  private saveSmartSlideHtml(rawHtml: string, index: number, replaceOldSlideAtIndex: boolean): Record<string, unknown> {
+    let normalized: string;
+    try {
+      normalized = normalizeSmartSlideHtml(rawHtml);
+    } catch (err) {
+      const message = err instanceof SmartGenerationError ? err.message : err instanceof Error ? err.message : String(err);
+      return { saved: false, message, validation_errors: [message] };
+    }
+    const slideType = (/^\s*<section\b[^>]*\bdata-slide-type\s*=\s*"([^"]*)"/i.exec(normalized)?.[1] ?? "content").toLowerCase();
+    const targetIndex = Math.max(0, index);
+
+    if (replaceOldSlideAtIndex) {
+      const existingSlide = getSlideByIndex(this.presentationId, targetIndex);
+      if (!existingSlide) return { saved: false, message: `No existing slide at index ${targetIndex}.`, validation_errors: [] };
+      const newId = uuidv4();
+      saveSlideDb(this.presentationId, {
+        id: newId, layout: slideType, layoutGroup: "smart",
+        index: targetIndex, content: {}, ui: null, htmlContent: normalized,
+        speakerNote: existingSlide.speaker_note ?? null,
+      }, true);
+      return { saved: true, action: "replaced", message: `Slide at index ${targetIndex} replaced.`, slide_id: newId, index: targetIndex };
+    }
+
+    const slides = getSlides(this.presentationId);
+    if (slides.length >= MAX_NUMBER_OF_SLIDES) {
+      return { saved: false, message: `Slide limit reached (${MAX_NUMBER_OF_SLIDES}).`, validation_errors: [], slide_count: slides.length };
+    }
+    const insertIndex = slides.length ? Math.min(targetIndex, Math.max(...slides.map((s) => s.slide_index)) + 1) : 0;
+    const newId = uuidv4();
+    saveSlideDb(this.presentationId, {
+      id: newId, layout: slideType, layoutGroup: "smart",
+      index: insertIndex, content: {}, ui: null, htmlContent: normalized,
     }, false);
     return { saved: true, action: "created", message: `New slide saved at index ${insertIndex}.`, slide_id: newId, index: insertIndex };
   }
@@ -757,7 +811,22 @@ export class PresentationContextStore {
   }
 
   async getSmartPresentationContext(opts: { includeSlideHtml?: boolean; maxHtmlCharsPerSlide?: number } = {}): Promise<Record<string, unknown>> {
-    return { message: "Smart presentation mode not fully implemented.", slides: [] };
+    const presentation = getPresentation(this.presentationId);
+    if (!presentation) return { found: false, message: "Presentation not found.", slides: [] };
+    const slides = getSlides(this.presentationId);
+    const maxChars = opts.maxHtmlCharsPerSlide ?? 4000;
+    return {
+      found: true,
+      title: presentation.title ?? null,
+      slide_count: slides.length,
+      slides: slides.map((s) => ({
+        index: s.slide_index,
+        slide_number: s.slide_index + 1,
+        slide_type: s.layout ?? null,
+        speaker_note: s.speaker_note ?? null,
+        html: opts.includeSlideHtml ? String(s.html_content ?? "").slice(0, maxChars) : undefined,
+      })),
+    };
   }
 
   async retrieveContext(query: string): Promise<string> {

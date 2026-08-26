@@ -25,6 +25,7 @@ export async function handlePresentingGetPresentation(cmd: Record<string, unknow
       language: row.language ?? null,
       n_slides: slides.length,
       layout,
+      generation_mode: row.generation_mode ?? "standard",
       slides: slides.map((s) => ({
         id: s.id,
         layout: s.layout ?? null,

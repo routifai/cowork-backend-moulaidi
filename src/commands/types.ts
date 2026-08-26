@@ -396,6 +396,15 @@ export interface PresentingListSmartExamplesCommand {
 	id: string;
 }
 
+/** Direct manual text edit → whole-slide HTML save, no LLM call (SmartSlideRenderer's contenteditable text leaves, blur-triggered). */
+export interface PresentingSaveSlideHtmlCommand {
+	type: "presenting_save_slide_html";
+	id: string;
+	presentationId: string;
+	index: number;
+	html: string;
+}
+
 export interface PresentingChatAttachment {
 	name?: string;
 	filePath: string;
@@ -467,4 +476,5 @@ export type Command =
 	| PresentingParseDocumentCommand
 	| PresentingExportPresentationCommand
 	| PresentingRestoreSlideCommand
-	| PresentingListSmartExamplesCommand;
+	| PresentingListSmartExamplesCommand
+	| PresentingSaveSlideHtmlCommand;

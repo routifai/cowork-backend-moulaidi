@@ -45,6 +45,7 @@ import { handlePresentingParseDocument } from "../presenting/commands/parse-docu
 import { handlePresentingExportPresentation } from "../presenting/commands/export-presentation.js";
 import { handlePresentingRestoreSlide } from "../presenting/commands/restore-slide.js";
 import { handlePresentingListSmartExamples } from "../presenting/commands/list-smart-examples.js";
+import { handlePresentingSaveSlideHtml } from "../presenting/commands/save-slide-html.js";
 
 // ── Settings handlers ──────────────────────────────────────────────────────
 import {
@@ -280,6 +281,10 @@ export function createHandler(deps: HandlerDependencies): (cmd: Command) => Prom
 
 		case "presenting_list_smart_examples":
 			await handlePresentingListSmartExamples(cmd as any);
+			break;
+
+		case "presenting_save_slide_html":
+			await handlePresentingSaveSlideHtml(cmd as any);
 			break;
 
 		default:

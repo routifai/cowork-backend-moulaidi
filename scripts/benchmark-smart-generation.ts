@@ -1,8 +1,9 @@
 /**
  * Times each real stage of "generate a Smart deck, then export it" against
- * the actual model/export pipeline (not mocked), to find out where the
- * ~3 minutes for a small deck actually goes — generation (one big blocking
- * LLM call for the whole deck) vs. export (html-to-any + CDN waits).
+ * the actual model/export pipeline (not mocked). Originally written to
+ * diagnose the old single-blocking-call generation (~55s for 4 slides);
+ * now measures the two-phase (outline + parallel slides) pipeline instead
+ * — same script, re-run against the new implementation to compare.
  * Run: npx tsx scripts/benchmark-smart-generation.ts [nSlides] [provider] [model]
  */
 import { existsSync, readFileSync } from "node:fs";

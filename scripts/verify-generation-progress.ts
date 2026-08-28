@@ -1,8 +1,11 @@
 /**
- * Verifies generateSmartPresentation's new onProgress callback fires
- * real, correctly-ordered "started"/"done" events per slide as the model
- * streams — not just that generation still succeeds. Run:
- * npx tsx scripts/verify-generation-progress.ts [nSlides]
+ * Verifies generateSmartPresentation's onProgress callback fires real,
+ * well-formed events for the two-phase (outline + parallel slides)
+ * pipeline — not just that generation still succeeds. Slides can complete
+ * out of order now (real concurrency, not a sequential stream), so this
+ * checks structural invariants (every "done" has a prior "started", every
+ * slide gets exactly one "done") rather than assuming index order.
+ * Run: npx tsx scripts/verify-generation-progress.ts [nSlides]
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -50,21 +53,29 @@ async function main() {
 	console.log(`generated ${result.slides.length} slides in ${((Date.now() - start) / 1000).toFixed(1)}s`);
 	console.log(`received ${events.length} progress events:`);
 	for (const e of events) {
-		console.log(`  [+${(e.t / 1000).toFixed(1)}s] slide ${e.slideIndex + 1}/${e.totalSlides} ${e.status}`);
-	}
-
-	// Sanity checks: events must be monotonically non-decreasing in time,
-	// every "done" for index i must come after a "started" for index i, and
-	// the last event must be slide (nSlides-1) done.
-	let ok = true;
-	for (let i = 1; i < events.length; i++) {
-		if (events[i].t < events[i - 1].t) {
-			ok = false;
-			console.log("FAIL: event timestamps out of order at index", i);
+		if (e.phase === "outline") {
+			console.log(`  [+${(e.t / 1000).toFixed(1)}s] outline ${e.status}`);
+		} else {
+			console.log(`  [+${(e.t / 1000).toFixed(1)}s] slide ${e.slideIndex + 1}/${e.totalSlides} ${e.status}`);
 		}
 	}
-	const startedIdx = new Set(events.filter((e) => e.status === "started").map((e) => e.slideIndex));
-	const doneIdx = new Set(events.filter((e) => e.status === "done").map((e) => e.slideIndex));
+
+	let ok = true;
+	const outlineEvents = events.filter((e): e is Extract<SmartGenerationProgressEvent, { phase: "outline" }> & { t: number } => e.phase === "outline");
+	const slideEvents = events.filter((e): e is Extract<SmartGenerationProgressEvent, { phase: "slide" }> & { t: number } => e.phase === "slide");
+
+	if (outlineEvents.length !== 2 || outlineEvents[0]?.status !== "started" || outlineEvents[1]?.status !== "done") {
+		ok = false;
+		console.log("FAIL: expected exactly [outline started, outline done]");
+	}
+	const outlineDoneAt = outlineEvents.find((e) => e.status === "done")?.t ?? -1;
+	if (slideEvents.some((e) => e.t < outlineDoneAt)) {
+		ok = false;
+		console.log("FAIL: a slide event arrived before the outline finished");
+	}
+
+	const startedIdx = new Set(slideEvents.filter((e) => e.status === "started").map((e) => e.slideIndex));
+	const doneIdx = new Set(slideEvents.filter((e) => e.status === "done").map((e) => e.slideIndex));
 	for (const idx of doneIdx) {
 		if (!startedIdx.has(idx)) {
 			ok = false;
@@ -73,7 +84,7 @@ async function main() {
 	}
 	if (doneIdx.size !== result.slides.length) {
 		ok = false;
-		console.log(`FAIL: got ${doneIdx.size} "done" events but ${result.slides.length} slides`);
+		console.log(`FAIL: got ${doneIdx.size} slide "done" events but ${result.slides.length} slides`);
 	}
 	console.log(ok ? "PASS: progress events are well-formed" : "FAIL: see above");
 	if (!ok) process.exit(1);

@@ -1,38 +1,51 @@
 /**
- * Smart presentation generation: the LLM writes complete, production-ready
- * HTML/Tailwind/Chart.js per slide directly — no TemplateV2 JSON element
- * tree, no template. Port of presenton's
- * servers/fastapi/utils/llm_calls/generate_smart_presentation.py (prompts,
- * delimiter parsing, and validation rules are close ports of that file —
- * the actual reason Presenton's Smart mode is pixel-perfect is that there's
- * no JSON translation layer to lose fidelity through; this mirrors that by
- * keeping HTML as the canonical stored representation, same as Presenton).
+ * Smart presentation generation, two-phase (see
+ * presenting/docs/adr/0002-two-phase-parallel-smart-generation.md for the
+ * full rationale):
  *
- * Simplification vs. the original: no per-slide streaming/incremental
- * acceptance (hypatia's existing generation commands are all blocking
- * request/response — see start-generation.ts). One full-deck completion is
- * requested per attempt.
+ * 1. Outline phase (generateSmartOutline) — one call plans the whole deck:
+ *    a per-slide {title, slide_type, topic} entry for every slide, plus a
+ *    shared design brief (palette, tone, layout conventions) so the
+ *    parallel phase below doesn't lose visual consistency. The
+ *    table-of-contents slide, when requested, is written here too — it's
+ *    the only slide that needs every other slide's title, and titles exist
+ *    at this point even though slide HTML doesn't yet.
+ * 2. Slide phase (generateSlidesInParallel) — every other slide is written
+ *    by its own concurrent tool-calling loop, scoped to exactly one
+ *    outline entry, with no visibility into the source content or sibling
+ *    slides (the outline's `topic` field carries everything it needs). Each
+ *    slide is submitted via an explicit `write_slide(html)` tool call, not
+ *    a delimited text blob — every slide is real, validated, structured
+ *    output from the start, not something recovered after the fact.
  *
- * On a validation failure that's traceable to one specific slide
- * (SmartGenerationError.slideIndex set), a targeted repair pass runs first
- * (attemptTargetedRepair): a small tool-calling loop hands the model just
- * that slide's HTML and the exact validation error, and the model calls
- * `write_slide` with a minimal fix — not a full-deck regeneration. This
- * exists because the naive fix (regenerate the whole deck from scratch on
- * any failure) makes every validation miss cost a full ~55s generation
- * call; a targeted single-slide fix is both cheaper and closer to how a
- * human would actually fix it. Only when repair can't produce a valid
- * result within its own small budget does the loop fall back to a full
- * regeneration attempt (the original, always-correct safety net) — see
- * SMART_GENERATION_MAX_ATTEMPTS.
+ * Both phases use the same lightweight mechanism: `ModelRuntime.completeSimple`
+ * plus a `tools` array (the same pattern chat/service.ts's edit loop already
+ * uses), not a full `AgentSession` — checked directly this session: no
+ * headless, non-workspace-bound AgentSession exists anywhere in this
+ * codebase, so that would be new infrastructure, not reuse.
+ *
+ * The shared design brief lives in every slide call's `systemPrompt`
+ * specifically so it's an identical, stable prefix across all N calls —
+ * `cacheControlFormat: "anthropic"` (already on by default in the vendored
+ * @earendil-works/pi-ai layer) marks it as an Anthropic prompt-cache
+ * breakpoint automatically. A cache entry only exists once the first
+ * response begins streaming, so the slide phase fires slide 1 alone first
+ * and starts the rest a short beat later — see CACHE_WARMUP_DELAY_MS.
+ *
+ * Prompts, HTML validation rules, and the character/word density limits
+ * below are close ports of presenton's
+ * servers/fastapi/utils/llm_calls/generate_smart_presentation.py, the same
+ * as before this file's two-phase rewrite — only the call structure
+ * changed, not what makes a slide valid.
  */
 import { Type } from "typebox";
 import { extractText, extractToolCalls } from "../chat/llm-tool-types.js";
 import { inspectSmartSlideLayout } from "./smart-slide-layout.js";
+import { runWithConcurrency } from "../utils/concurrency.js";
+import { logDebug } from "../../protocol.js";
 
 export const DEFAULT_SMART_SLIDE_COUNT = 8;
 export const MAX_SMART_SLIDE_COUNT = 20;
-const SMART_GENERATION_MAX_ATTEMPTS = 5;
 
 const SMART_TITLE_MAX_VISIBLE_CHARACTERS = 800;
 const SMART_TITLE_MAX_VISIBLE_WORDS = 80;
@@ -55,27 +68,41 @@ export interface GeneratedSmartPresentation {
   slides: SmartSlide[];
 }
 
+/** One slide's plan from the outline phase — everything its own slide-phase call needs, since it won't see the source content or sibling slides. */
+export interface SmartOutlineEntry {
+  index: number;
+  slide_type: string;
+  title: string;
+  topic: string;
+}
+
 export class SmartGenerationError extends Error {
-  /** Set when the failure is traceable to one specific slide — enables the targeted repair pass instead of a full-deck regeneration. */
+  /** Which slide failed, when known — for logging/error messages, not branching (each slide already gets its own isolated retry loop). */
   slideIndex?: number;
-  /** Best-effort {title, slides} built up to the point of failure — lets the caller attempt a targeted repair instead of discarding everything and regenerating the whole deck. */
-  partial?: { title: string; slides: SmartSlide[] };
-  constructor(msg: string, opts?: { slideIndex?: number; partial?: { title: string; slides: SmartSlide[] } }) {
+  constructor(msg: string, opts?: { slideIndex?: number }) {
     super(msg);
     this.name = "SmartGenerationError";
     this.slideIndex = opts?.slideIndex;
-    this.partial = opts?.partial;
   }
 }
 
-// ── Prompts (ported near-verbatim) ──────────────────────────────────────────
+/**
+ * A response with `stopReason: "error"` means the provider itself rejected
+ * the request (bad auth, insufficient credits, invalid request, etc.) — no
+ * amount of "call the tool now" nudging or retrying fixes that. Both
+ * generateSmartOutline and generateOneSlide call this immediately after
+ * every completion so a billing/auth failure surfaces on the first attempt
+ * instead of silently burning through the full retry budget against the
+ * same non-retryable error.
+ */
+function throwOnProviderError(assistantMessage: unknown, context: string, slideIndex?: number): void {
+  const msg = assistantMessage as { stopReason?: string; errorMessage?: string } | null | undefined;
+  if (msg?.stopReason === "error") {
+    throw new SmartGenerationError(`${context}: ${msg.errorMessage || "the model provider rejected the request"}`, { slideIndex });
+  }
+}
 
-const SMART_DECK_SYSTEM_PROMPT =
-  "You are an expert presentation designer and frontend engineer. Return the " +
-  "entire production-ready deck in the requested delimiter format. Use real " +
-  "Chart.js charts for quantitative evidence whenever they communicate the " +
-  "story better than text; never substitute generated chart images. Treat " +
-  "overflow-free layout as a hard validation requirement.";
+// ── Shared authoring rules (ported near-verbatim, reused by both phases) ───
 
 const SMART_OVERFLOW_PREVENTION_PROMPT = `
 Overflow prevention is a hard requirement:
@@ -90,9 +117,8 @@ Overflow prevention is a hard requirement:
   130-180 words when organized into readable columns or sections. TOC slides
   may include the entries required by the deck.
 - Preserve the user's important facts, evidence, and requested points. When one
-  slide is crowded, redistribute content across the fixed deck, simplify
-  decoration, or use a clearer multi-column structure; do not silently discard
-  substance merely to make the slide sparse.
+  slide is crowded, simplify decoration or use a clearer multi-column
+  structure; do not silently discard substance merely to make the slide sparse.
 - Use flex/grid for primary layout. Add \`min-w-0\` to constrained columns and
   \`min-h-0\` to constrained rows. Text containers must use \`break-words\` where
   long values or URLs may appear.
@@ -111,41 +137,37 @@ Overflow prevention is a hard requirement:
 - Never place \`overflow-hidden\` on a descendant that contains text. Keep all
   meaningful content fully inside the safe area by reducing density and reflowing
   the layout, not by clipping it.
-- Before returning each slide, perform a final fit pass: verify every line of
-  text is visible, cards contain their content, siblings do not overlap, and no
+- Before submitting, perform a final fit pass: verify every line of text is
+  visible, cards contain their content, siblings do not overlap, and no
   meaningful element crosses the 1280×720 boundary.
-`;
+`.trim();
 
 const SMART_VISUAL_EVIDENCE_PROMPT = `
 Visual evidence and asset decisions:
-- Before choosing visuals, identify what each slide needs to communicate:
-  a concept, process, product, people story, comparison, hierarchy, timeline,
-  quote, qualitative insight, or quantitative relationship.
+- Identify what this slide needs to communicate: a concept, process, product,
+  people story, comparison, hierarchy, timeline, quote, qualitative insight, or
+  quantitative relationship.
 - Match the visual form to the narrative intent. Use diagrams, flows, matrices,
   screenshots, product imagery, icons, callouts, quotes, or text-led layouts
   when they communicate the idea better than charts or data graphics.
-- Do not force data visualization into decks whose value is strategic,
+- Do not force data visualization onto slides whose value is strategic,
   educational, narrative, conceptual, operational, or design-oriented. Use
   charts only when quantitative evidence materially improves the slide.
-- When the user asks for a data-driven presentation, charts, metrics, trends, or
-  how a value changes, use Chart.js on the relevant evidence slides even when
-  the user does not explicitly mention Chart.js.
 - Make charts the primary visual evidence for quantitative slides. Do not
   generate, search for, or use an image of a chart, graph, dashboard, or
   infographic as a substitute for an editable Chart.js chart.
 - Use generated images only for genuinely photographic, illustrative, or
-  atmospheric storytelling. Do not fill a data-driven deck with decorative
-  images while omitting the charts needed to support its conclusions.
+  atmospheric storytelling.
 - Choose the chart form from the relationship: line for change over time, bar
   for comparisons or rankings, scatter for correlation, and doughnut/pie only
   for a simple part-to-whole relationship with few categories.
 - Every chart must communicate a takeaway and include a descriptive title,
   readable labels, units, time period or baseline, and a concise source note
   when source information is available.
-- Use numeric values supplied by the prompt or source context. You may use
-  broadly established facts only when you can state them accurately; never
-  invent precise values, projections, or citations to make a chart look richer.
-`;
+- Use numeric values supplied in this slide's plan. You may use broadly
+  established facts only when you can state them accurately; never invent
+  precise values, projections, or citations to make a chart look richer.
+`.trim();
 
 const CHART_JS_INSTRUCTIONS = `
 - Use Chart.js for every quantitative chart. Assume \`Chart\` and the \`datalabels\`
@@ -160,53 +182,16 @@ const CHART_JS_INSTRUCTIONS = `
   and pie/donut charts.
 - A chart is incomplete unless the same slide contains both its canvas and its
   inline initialization script. Never return a chart canvas by itself.
-`;
-
-const SMART_DIRECT_HTML_PROMPT =
-  `
-Return exactly this delimiter format:
-<!-- PRESENTATION_TITLE: concise deck title -->
-<!-- SLIDE_START -->
-<section data-slide-type="title" data-slide-title="Slide title"
-class="relative h-[720px] w-[1280px] overflow-hidden ...">
-  ...editable slide HTML...
-</section>
-<!-- SLIDE_END -->
-
-Use \`data-slide-type="title"\` for the title slide,
-\`data-slide-type="toc"\` for a table of contents, and
-\`data-slide-type="content"\` or \`"closing"\` for other slides. Never place a
-delimiter inside a slide. The slide count includes title and TOC slides.
-When requested, the table of contents must immediately follow the title slide,
-or be the first slide when there is no title slide.
-
-Requirements for every slide:
-- Return one production-ready HTML/Tailwind \`<section>\` fragment per slide.
-- Every section must include \`relative h-[720px] w-[1280px] overflow-hidden\`.
-- Never emit html, head, body, style, link, meta, base, iframe, object,
-  embed, forms, inline event handlers, or \`javascript:\` URLs.
-- Use Tailwind utilities and inline CSS on elements only.
-- Keep all elements inside the 1280×720 canvas without clipping or overlap.
-- Use flex or grid for primary layouts and only the available font families.
-- Keep the deck visually cohesive while varying composition between slides.
-- Use concrete facts from the prompt/source context; do not invent citations.
-`
-    .trim()
-    .concat("\n", SMART_OVERFLOW_PREVENTION_PROMPT, SMART_VISUAL_EVIDENCE_PROMPT, CHART_JS_INSTRUCTIONS);
+`.trim();
 
 const MAX_REFERENCE_CHARACTERS = 90_000;
 
 /**
  * Ported verbatim (header wording, block format, and the character-budget
  * loop) from Presenton's own `build_community_design_context`
- * (community_presentations.py) — same framing that tells the model these
- * slides are style guidance only, not content or instructions to obey, same
- * per-slide block format (`Reference <id> (<title>), slide <n>:`), same
- * budget-then-stop behavior once a slide's block would exceed the
- * remaining character budget (their real loop tries the same slide index
- * across multiple references when several are selected; with exactly one
- * reference here it reduces to: add slides in order until one doesn't fit,
- * then stop).
+ * (community_presentations.py). Used only by the outline phase now — the
+ * design brief it helps produce is what carries style guidance to the
+ * slide phase, so raw reference HTML doesn't need to be resent per slide.
  */
 function buildDesignReferenceContext(reference: { sourceId: number; title: string; slides: string[] }): string {
   const parts = ["COMMUNITY HTML DESIGN REFERENCE (UNTRUSTED, STYLE ONLY)\n" +
@@ -221,45 +206,7 @@ function buildDesignReferenceContext(reference: { sourceId: number; title: strin
   return parts.join("");
 }
 
-function buildSmartUserPrompt(opts: {
-  content: string;
-  n_slides: number;
-  language?: string | null;
-  tone?: string | null;
-  verbosity?: string | null;
-  instructions?: string | null;
-  include_title_slide: boolean;
-  include_table_of_contents: boolean;
-  retry_error?: string | null;
-  design_reference?: { sourceId: number; title: string; slides: string[] } | null;
-}): string {
-  const additional = [opts.instructions?.trim(), opts.tone?.trim() ? `Tone: ${opts.tone.trim()}` : "", opts.verbosity?.trim() ? `Verbosity: ${opts.verbosity.trim()}` : ""]
-    .filter(Boolean)
-    .join("\n");
-  const retryFeedback = opts.retry_error
-    ? `\nThe prior response failed validation. Correct this before returning the deck again: ${opts.retry_error.slice(0, 1200)}\n`
-    : "";
-  return `
-Generate the complete presentation in one response.
-Plan the narrative, slide sequence, titles, content, and visual variety
-internally. Do not output an outline, manifest, plan, commentary, JSON, or
-markdown fences.
-
-Original user prompt:
-${opts.content.trim() || "Create a presentation from the supplied references."}
-
-Additional instructions: ${additional || "None"}
-Language: ${opts.language || "auto-detect"}
-Generate exactly ${opts.n_slides} total slides.
-Include title slide: ${opts.include_title_slide}
-Include a visible table-of-contents slide: ${opts.include_table_of_contents}
-${retryFeedback}
-${SMART_DIRECT_HTML_PROMPT}
-${opts.design_reference ? `\n\n${buildDesignReferenceContext(opts.design_reference)}` : ""}
-`.trim();
-}
-
-// ── Parsing ──────────────────────────────────────────────────────────────
+// ── HTML validation (shared by both phases) ─────────────────────────────
 
 const FENCE_PATTERN = /^\s*```(?:html)?\s*|\s*```\s*$/gi;
 const UNSAFE_DOCUMENT_TAGS = /<\/?(?:html|head|body|style|link|meta|base|iframe|object|embed|form)\b[^>]*>/gi;
@@ -278,8 +225,6 @@ const HTML_TAG = /<[^>]+>/g;
 const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 const SCROLL_OR_CLIP_UTILITY = /(?:^|\s)(?:overflow-(?:auto|scroll)|overflow-[xy]-(?:auto|scroll)|line-clamp-[^\s]+|truncate|text-ellipsis)(?:\s|$)/i;
 const SCROLL_STYLE = /\boverflow(?:-[xy])?\s*:\s*(?:auto|scroll)\b/i;
-const SMART_DECK_TITLE_RE = /<!--\s*PRESENTATION_TITLE\s*:\s*(.*?)\s*-->/i;
-const SMART_SLIDE_BLOCK_RE = /<!--\s*SLIDE_START\s*-->\s*([\s\S]*?)\s*<!--\s*SLIDE_END\s*-->/gi;
 
 function attribute(attrs: string, name: string): string {
   const match = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i").exec(attrs);
@@ -374,7 +319,7 @@ function validateSmartSlideLayoutSafety(html: string): void {
   }
   if (visibleText.length > maxCharacters || wordCount > maxWords) {
     throw new SmartGenerationError(
-      `The Smart ${slideType} slide is too text-dense for its 1280x720 composition (${wordCount} words, ${visibleText.length} characters). Shorten or reflow the copy, or redistribute it across the fixed deck without dropping important content.`,
+      `The Smart ${slideType} slide is too text-dense for its 1280x720 composition (${wordCount} words, ${visibleText.length} characters). Shorten or reflow the copy without dropping important content.`,
     );
   }
 
@@ -407,6 +352,7 @@ function slideFromHtml(value: unknown, index: number): SmartSlide {
   return { title: title || `Slide ${index + 1}`, html, speaker_note: "", slide_type: slideType };
 }
 
+/** Final defense-in-depth check over the fully assembled deck — each slide's position/type is already fixed by the outline, so this should never actually fire, but stays as a cheap last-line safety net. */
 function validateSlidePosition(
   slide: SmartSlide,
   index: number,
@@ -414,199 +360,406 @@ function validateSlidePosition(
 ): void {
   const { slide_type } = slide;
   if (index === 0 && opts.include_title_slide && slide_type !== "title") {
-    throw new SmartGenerationError("The first Smart slide must be a title slide");
+    throw new SmartGenerationError("The first Smart slide must be a title slide", { slideIndex: index });
   }
   if (slide_type === "title" && (!opts.include_title_slide || index !== 0)) {
-    throw new SmartGenerationError("The model repeated the Smart title slide");
+    throw new SmartGenerationError("The model repeated the Smart title slide", { slideIndex: index });
   }
   const tocIndex = opts.include_title_slide ? 1 : 0;
   const isToc = slide_type === "toc" || slide_type === "table_of_contents";
   if (opts.include_table_of_contents && index === tocIndex && !isToc) {
-    throw new SmartGenerationError("The Smart table of contents is missing");
+    throw new SmartGenerationError("The Smart table of contents is missing", { slideIndex: index });
   }
   if (isToc && (!opts.include_table_of_contents || index !== tocIndex)) {
-    throw new SmartGenerationError("The model repeated the Smart table of contents");
+    throw new SmartGenerationError("The model repeated the Smart table of contents", { slideIndex: index });
   }
 }
 
-function parseSmartPresentationHtml(
-  response: string,
-  opts: { expected_slide_count: number; include_title_slide: boolean; include_table_of_contents: boolean },
-): { title: string; slides: SmartSlide[] } {
-  const candidate = response.replace(FENCE_PATTERN, "").trim();
-  const titleMatch = SMART_DECK_TITLE_RE.exec(candidate);
-  if (!titleMatch || !titleMatch[1].trim()) throw new SmartGenerationError("The Smart deck title marker is missing");
+// ── Phase 1: outline + design brief (+ TOC HTML, if requested) ────────────
 
-  const starts = (candidate.match(/<!--\s*SLIDE_START\s*-->/gi) ?? []).length;
-  const ends = (candidate.match(/<!--\s*SLIDE_END\s*-->/gi) ?? []).length;
-  const blocks: string[] = [];
-  SMART_SLIDE_BLOCK_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = SMART_SLIDE_BLOCK_RE.exec(candidate))) blocks.push(m[1].trim());
-  if (starts !== ends || blocks.length !== starts) throw new SmartGenerationError("The Smart slide delimiters are unmatched");
-  if (blocks.length !== opts.expected_slide_count) {
-    throw new SmartGenerationError(`The model returned ${blocks.length} slides instead of ${opts.expected_slide_count}`);
-  }
+const OUTLINE_MAX_ROUNDS = 4;
 
-  const title = titleMatch[1].trim();
-  // Tolerant build: keep going past the first broken slide (a raw/unnormalized
-  // placeholder stands in for it) so a full best-effort {title, slides} can be
-  // attached to the thrown error — attemptTargetedRepair needs the *whole*
-  // deck, not just the one broken slide, to hand back a complete, valid result.
-  const slides: SmartSlide[] = [];
-  let firstError: SmartGenerationError | null = null;
-  for (let index = 0; index < blocks.length; index++) {
-    try {
-      slides.push(slideFromHtml(blocks[index], index));
-    } catch (err) {
-      const e = err instanceof SmartGenerationError ? err : new SmartGenerationError(String(err));
-      if (e.slideIndex === undefined) e.slideIndex = index;
-      if (!firstError) firstError = e;
-      slides.push({ title: `Slide ${index + 1}`, html: blocks[index], speaker_note: "", slide_type: "content" });
-    }
-  }
-  if (firstError) {
-    firstError.partial = { title, slides };
-    throw firstError;
-  }
-
-  for (let index = 0; index < slides.length; index++) {
-    try {
-      validateSlidePosition(slides[index], index, opts);
-    } catch (err) {
-      const e = err instanceof SmartGenerationError ? err : new SmartGenerationError(String(err));
-      if (e.slideIndex === undefined) e.slideIndex = index;
-      e.partial = { title, slides };
-      throw e;
-    }
-  }
-  return { title, slides };
-}
-
-// ── Targeted repair (single-slide fix, not a full-deck regeneration) ──────
-
-const REPAIR_MAX_ROUNDS = 4;
-
-const REPAIR_TOOLS = [
+const OUTLINE_TOOLS = [
   {
-    name: "read_slide",
-    description: "Read the current HTML of one slide by its 0-based index.",
-    parameters: Type.Object({ index: Type.Number({ description: "0-based slide index" }) }),
-  },
-  {
-    name: "write_slide",
+    name: "submit_outline",
     description:
-      "Replace one slide's HTML with a corrected version. Make the smallest edit that fixes the stated problem — keep everything else about the slide (content, structure, style) unchanged. Do not regenerate the slide from scratch.",
+      "Submit the presentation outline: deck title, a shared design brief for every slide-writer, a plan for every slide, and (if a table of contents was requested) its full HTML.",
     parameters: Type.Object({
-      index: Type.Number({ description: "0-based slide index" }),
-      html: Type.String({ description: "The corrected full <section>...</section> HTML for this slide" }),
+      title: Type.String({ description: "Deck title" }),
+      design_brief: Type.String({
+        description:
+          "Concrete, actionable shared design direction every slide-writer will follow verbatim, without seeing each other's output: exact hex color palette, typography choices from the available font families, tone/voice, and layout/composition conventions. Be specific — 'clean and modern' is not usable guidance; exact hex values and concrete layout patterns are.",
+      }),
+      slides: Type.Array(
+        Type.Object({
+          slide_type: Type.Union([Type.Literal("title"), Type.Literal("toc"), Type.Literal("content"), Type.Literal("closing")]),
+          title: Type.String(),
+          topic: Type.String({
+            description:
+              "Exactly what this slide must say: key points, specific facts/data/evidence, and narrative angle. The slide-writer will NOT see the original source material or any other slide — include everything they need here.",
+          }),
+        }),
+      ),
+      toc_html: Type.Optional(
+        Type.String({
+          description:
+            "If a table-of-contents slide is included, its full production-ready <section>...</section> HTML, listing the OTHER slides' titles. Omit entirely if no table of contents was requested.",
+        }),
+      ),
     }),
   },
 ];
 
-/**
- * Fixes exactly one broken slide via a small tool-calling loop instead of
- * regenerating the whole deck. Returns null (caller should fall back to a
- * full regeneration attempt) if the model can't produce a valid slide
- * within REPAIR_MAX_ROUNDS, or if the failure isn't traceable to one slide
- * (SmartGenerationError.slideIndex/partial unset — a deck-structural
- * problem like the wrong slide count, which a single-slide edit can't fix).
- */
-export async function attemptTargetedRepair(
-  deps: { modelRuntime: any; modelRegistry: any },
+const SMART_OUTLINE_SYSTEM_PROMPT =
+  "You are an expert presentation designer planning a deck that will be written slide-by-slide by other writers " +
+  "who will not see each other's output or the original source material. Plan the narrative, slide sequence, " +
+  "titles, and content allocation internally, then submit your plan via the submit_outline tool call. " +
+  "Do not write full slide HTML yourself except for the table-of-contents slide, if one is requested — its HTML " +
+  "belongs here because it is the only slide that needs to know every other slide's title.";
+
+function buildOutlineUserPrompt(opts: {
+  content: string;
+  n_slides: number;
+  language?: string | null;
+  tone?: string | null;
+  verbosity?: string | null;
+  instructions?: string | null;
+  include_title_slide: boolean;
+  include_table_of_contents: boolean;
+  design_reference?: { sourceId: number; title: string; slides: string[] } | null;
+}): string {
+  const additional = [opts.instructions?.trim(), opts.tone?.trim() ? `Tone: ${opts.tone.trim()}` : "", opts.verbosity?.trim() ? `Verbosity: ${opts.verbosity.trim()}` : ""]
+    .filter(Boolean)
+    .join("\n");
+  const tocIndex = opts.include_title_slide ? 1 : 0;
+  return `
+Plan a ${opts.n_slides}-slide presentation and submit the outline via submit_outline.
+
+Original user prompt:
+${opts.content.trim() || "Create a presentation from the supplied references."}
+
+Additional instructions: ${additional || "None"}
+Language: ${opts.language || "auto-detect"}
+Generate exactly ${opts.n_slides} total slide plans.
+Include title slide: ${opts.include_title_slide}${opts.include_title_slide ? " (must be slides[0], slide_type \"title\")" : ""}
+Include a visible table-of-contents slide: ${opts.include_table_of_contents}${opts.include_table_of_contents ? ` (must be slides[${tocIndex}], slide_type "toc", and you must also submit its toc_html)` : ""}
+
+The table-of-contents slide's HTML (if any) is real production output and must follow these rules like any other slide:
+${SMART_OVERFLOW_PREVENTION_PROMPT}
+${opts.design_reference ? `\n${buildDesignReferenceContext(opts.design_reference)}` : ""}
+`.trim();
+}
+
+function validateOutline(
+  args: Record<string, unknown>,
+  opts: { n_slides: number; include_title_slide: boolean; include_table_of_contents: boolean },
+): { title: string; designBrief: string; outline: SmartOutlineEntry[]; tocSlide: SmartSlide | null } {
+  const title = String(args.title ?? "").trim();
+  if (!title) throw new SmartGenerationError("The outline is missing a deck title");
+
+  const designBrief = String(args.design_brief ?? "").trim();
+  if (!designBrief) throw new SmartGenerationError("The outline is missing a design brief");
+
+  const rawSlides = Array.isArray(args.slides) ? args.slides : [];
+  if (rawSlides.length !== opts.n_slides) {
+    throw new SmartGenerationError(`The outline has ${rawSlides.length} slide plans instead of ${opts.n_slides}`);
+  }
+
+  const tocIndex = opts.include_table_of_contents ? (opts.include_title_slide ? 1 : 0) : -1;
+  const outline: SmartOutlineEntry[] = rawSlides.map((raw, index) => {
+    const r = (raw ?? {}) as Record<string, unknown>;
+    const slide_type = String(r.slide_type ?? "content").toLowerCase();
+    const entryTitle = String(r.title ?? "").trim() || `Slide ${index + 1}`;
+    const topic = String(r.topic ?? "").trim();
+    if (!topic) throw new SmartGenerationError(`Slide ${index + 1}'s outline entry is missing a topic`, { slideIndex: index });
+    return { index, slide_type, title: entryTitle, topic };
+  });
+
+  for (const entry of outline) {
+    if (entry.index === 0 && opts.include_title_slide && entry.slide_type !== "title") {
+      throw new SmartGenerationError("The outline's first slide must be slide_type \"title\"", { slideIndex: 0 });
+    }
+    if (entry.slide_type === "title" && (!opts.include_title_slide || entry.index !== 0)) {
+      throw new SmartGenerationError(
+        "The outline assigns \"title\" to a slide other than the first, or a title slide wasn't requested",
+        { slideIndex: entry.index },
+      );
+    }
+    const isToc = entry.slide_type === "toc" || entry.slide_type === "table_of_contents";
+    if (opts.include_table_of_contents && entry.index === tocIndex && !isToc) {
+      throw new SmartGenerationError(`The outline's slide ${tocIndex + 1} must be slide_type "toc"`, { slideIndex: entry.index });
+    }
+    if (isToc && (!opts.include_table_of_contents || entry.index !== tocIndex)) {
+      throw new SmartGenerationError(
+        "The outline assigns \"toc\" to the wrong slide, or a table of contents wasn't requested",
+        { slideIndex: entry.index },
+      );
+    }
+  }
+
+  let tocSlide: SmartSlide | null = null;
+  if (opts.include_table_of_contents) {
+    const tocHtml = args.toc_html;
+    if (typeof tocHtml !== "string" || !tocHtml.trim()) {
+      throw new SmartGenerationError("A table of contents was requested but toc_html is missing", { slideIndex: tocIndex });
+    }
+    tocSlide = slideFromHtml(tocHtml, tocIndex);
+    if (tocSlide.slide_type !== "toc" && tocSlide.slide_type !== "table_of_contents") {
+      throw new SmartGenerationError(`The submitted toc_html has data-slide-type="${tocSlide.slide_type}", expected "toc"`, { slideIndex: tocIndex });
+    }
+  }
+
+  return { title, designBrief, outline, tocSlide };
+}
+
+async function generateSmartOutline(
+  modelRuntime: any,
   found: unknown,
-  error: SmartGenerationError,
-  opts: { include_title_slide: boolean; include_table_of_contents: boolean },
-): Promise<GeneratedSmartPresentation | null> {
-  if (error.slideIndex === undefined || !error.partial) return null;
-  const { title, slides: originalSlides } = error.partial;
-  if (error.slideIndex >= originalSlides.length) return null;
-  const slides = originalSlides.map((s) => ({ ...s }));
-  const targetIndex = error.slideIndex;
-  let targetRepaired = false;
-
-  const systemPrompt =
-    "You are fixing ONE broken slide in an already-generated presentation. " +
-    "You will be told exactly what is wrong. Use `read_slide` if you need to see the current HTML, " +
-    "then call `write_slide` with a corrected version of THAT SAME slide. " +
-    "Make the smallest possible edit that fixes the stated problem — do not rewrite the slide from scratch, " +
-    "and do not touch any other slide. Stop calling tools once the fix is submitted.";
-
+  opts: {
+    content: string;
+    n_slides: number;
+    language?: string | null;
+    tone?: string | null;
+    verbosity?: string | null;
+    instructions?: string | null;
+    include_title_slide: boolean;
+    include_table_of_contents: boolean;
+    design_reference?: { sourceId: number; title: string; slides: string[] } | null;
+  },
+): Promise<{ title: string; designBrief: string; outline: SmartOutlineEntry[]; tocSlide: SmartSlide | null }> {
   const messages: Array<Record<string, unknown>> = [
-    {
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: `Slide ${targetIndex + 1} (0-based index ${targetIndex}) failed validation:\n${error.message}\n\nCurrent HTML:\n${slides[targetIndex].html}\n\nFix only this slide.`,
-        },
-      ],
-    },
+    { role: "user", content: [{ type: "text", text: buildOutlineUserPrompt(opts) }] },
   ];
+  let lastError: string | null = null;
 
-  for (let round = 0; round < REPAIR_MAX_ROUNDS; round++) {
-    const assistantMessage = await deps.modelRuntime.completeSimple(found, {
-      systemPrompt,
+  for (let round = 0; round < OUTLINE_MAX_ROUNDS; round++) {
+    const assistantMessage = await modelRuntime.completeSimple(found, {
+      systemPrompt: SMART_OUTLINE_SYSTEM_PROMPT,
       messages,
-      tools: REPAIR_TOOLS,
+      tools: OUTLINE_TOOLS,
     });
-
+    throwOnProviderError(assistantMessage, "Failed to generate the outline");
     const toolCalls = extractToolCalls(assistantMessage);
-    if (!toolCalls.length) break; // model believes the fix is done
-
     messages.push(assistantMessage as unknown as Record<string, unknown>);
-    for (const toolCall of toolCalls) {
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(toolCall.arguments);
-      } catch {
-        /* leave empty */
-      }
-      let resultText: string;
-      let isError = false;
-      const index = Number(args.index);
-      if (!Number.isInteger(index) || index < 0 || index >= slides.length) {
-        resultText = `No slide at index ${String(args.index)}.`;
-        isError = true;
-      } else if (toolCall.name === "read_slide") {
-        resultText = slides[index].html;
-      } else if (toolCall.name === "write_slide") {
-        try {
-          slides[index] = slideFromHtml(String(args.html ?? ""), index);
-          if (index === targetIndex) targetRepaired = true;
-          resultText = "Slide updated and passed validation.";
-        } catch (err) {
-          resultText = err instanceof Error ? err.message : String(err);
-          isError = true;
-        }
-      } else {
-        resultText = `Unknown tool ${toolCall.name}`;
-        isError = true;
-      }
+
+    if (!toolCalls.length) {
+      logDebug(
+        `smart-generation: outline round ${round} produced no tool call — stopReason=${String((assistantMessage as any)?.stopReason)} errorMessage=${String((assistantMessage as any)?.errorMessage)} text=${JSON.stringify(extractText(assistantMessage).slice(0, 500))}`,
+      );
+      messages.push({ role: "user", content: [{ type: "text", text: "Call submit_outline now." }] });
+      continue;
+    }
+    const toolCall = toolCalls[0];
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(toolCall.arguments);
+    } catch {
+      /* leave empty */
+    }
+
+    try {
+      return validateOutline(args, opts);
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
       messages.push({
         role: "toolResult",
         toolCallId: toolCall.id,
         toolName: toolCall.name,
-        content: [{ type: "text", text: resultText }],
-        isError,
+        content: [{ type: "text", text: lastError }],
+        isError: true,
       });
     }
   }
 
-  // The model may stop calling tools without ever successfully repairing the
-  // target slide (e.g. every write_slide attempt still failed validation) —
-  // in that case slides[targetIndex] is still the original broken/raw HTML.
-  // Never treat that as success.
-  if (!targetRepaired) return null;
+  throw new SmartGenerationError(`Failed to produce a valid outline after ${OUTLINE_MAX_ROUNDS} attempts: ${lastError ?? "model never called submit_outline"}`);
+}
 
-  // Single-slide re-validation (inside write_slide, above) doesn't catch
-  // cross-slide constraints — re-check those now that repair has stopped.
-  try {
-    slides.forEach((slide, index) => validateSlidePosition(slide, index, opts));
-  } catch {
-    return null;
+// ── Phase 2: one slide, from its outline entry only ────────────────────────
+
+const SLIDE_WRITE_TOOL = [
+  {
+    name: "write_slide",
+    description: "Submit this slide's complete, production-ready HTML.",
+    parameters: Type.Object({ html: Type.String({ description: "The full <section>...</section> HTML for this one slide" }) }),
+  },
+];
+
+const SLIDE_OUTPUT_FORMAT_PROMPT = `
+Return exactly one production-ready HTML/Tailwind \`<section>\` fragment via the \`write_slide\` tool call — nothing else, no commentary, no markdown fences.
+- Include \`relative h-[720px] w-[1280px] overflow-hidden\` on the root section.
+- Set \`data-slide-type\` on the root section to the slide type you were assigned.
+- Set \`data-slide-title\` on the root section to this slide's title.
+- Never emit html, head, body, style, link, meta, base, iframe, object, embed, forms, inline event handlers, or \`javascript:\` URLs.
+- Use Tailwind utilities and inline CSS on elements only. Use flex or grid for primary layout and only the available font families.
+- Use concrete facts supplied in this slide's plan; do not invent citations.
+`.trim();
+
+/**
+ * Every call built from the same `designBrief` produces an identical
+ * string — the point: an identical, stable systemPrompt across all N
+ * slide calls in one generation run is what makes Anthropic's automatic
+ * cache_control breakpoint (cacheControlFormat: "anthropic") actually hit.
+ */
+function buildSlideSystemPrompt(designBrief: string): string {
+  return [
+    "You are an expert presentation designer and frontend engineer, writing ONE slide of a larger deck.",
+    "You cannot see the deck's other slides. Follow the shared design brief below exactly so this slide stays visually consistent with the rest of the deck.",
+    "",
+    "SHARED DESIGN BRIEF:",
+    designBrief,
+    "",
+    SLIDE_OUTPUT_FORMAT_PROMPT,
+    SMART_OVERFLOW_PREVENTION_PROMPT,
+    SMART_VISUAL_EVIDENCE_PROMPT,
+    CHART_JS_INSTRUCTIONS,
+  ].join("\n\n");
+}
+
+function buildSlideUserPrompt(entry: SmartOutlineEntry, ctx: { totalSlides: number; language?: string | null }): string {
+  return `
+This is slide ${entry.index + 1} of ${ctx.totalSlides} (slide_type: "${entry.slide_type}").
+Slide title: ${entry.title}
+What this slide must cover: ${entry.topic}
+Language: ${ctx.language || "auto-detect"}
+
+Write this slide now and submit it via write_slide.
+`.trim();
+}
+
+const SLIDE_GENERATION_MAX_ROUNDS = 4;
+
+/** One slide, one isolated conversation: writes it, retries in-place against validation errors up to SLIDE_GENERATION_MAX_ROUNDS. */
+async function generateOneSlide(
+  modelRuntime: any,
+  found: unknown,
+  systemPrompt: string,
+  entry: SmartOutlineEntry,
+  ctx: { totalSlides: number; language?: string | null },
+): Promise<SmartSlide> {
+  const messages: Array<Record<string, unknown>> = [
+    { role: "user", content: [{ type: "text", text: buildSlideUserPrompt(entry, ctx) }] },
+  ];
+  let lastError: string | null = null;
+
+  for (let round = 0; round < SLIDE_GENERATION_MAX_ROUNDS; round++) {
+    const assistantMessage = await modelRuntime.completeSimple(found, {
+      systemPrompt,
+      messages,
+      tools: SLIDE_WRITE_TOOL,
+    });
+    throwOnProviderError(assistantMessage, `Failed to generate slide ${entry.index + 1} ("${entry.title}")`, entry.index);
+    const toolCalls = extractToolCalls(assistantMessage);
+    messages.push(assistantMessage as unknown as Record<string, unknown>);
+
+    if (!toolCalls.length) {
+      logDebug(
+        `smart-generation: slide ${entry.index} round ${round} produced no tool call — stopReason=${String((assistantMessage as any)?.stopReason)} errorMessage=${String((assistantMessage as any)?.errorMessage)} text=${JSON.stringify(extractText(assistantMessage).slice(0, 500))}`,
+      );
+      messages.push({ role: "user", content: [{ type: "text", text: "Call write_slide with this slide's HTML now." }] });
+      continue;
+    }
+    const toolCall = toolCalls[0];
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(toolCall.arguments);
+    } catch {
+      /* leave empty */
+    }
+
+    try {
+      const slide = slideFromHtml(args.html, entry.index);
+      if (slide.slide_type !== entry.slide_type) {
+        throw new SmartGenerationError(
+          `Expected slide_type "${entry.slide_type}" (per this slide's plan) but the HTML's data-slide-type is "${slide.slide_type}". Set data-slide-type="${entry.slide_type}" on the root <section> and resubmit.`,
+        );
+      }
+      return { ...slide, title: entry.title || slide.title };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      messages.push({
+        role: "toolResult",
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        content: [{ type: "text", text: lastError }],
+        isError: true,
+      });
+    }
   }
-  return { title, slides };
+
+  throw new SmartGenerationError(
+    `Slide ${entry.index + 1} ("${entry.title}") failed validation after ${SLIDE_GENERATION_MAX_ROUNDS} rounds: ${lastError ?? "model never called write_slide"}`,
+    { slideIndex: entry.index },
+  );
+}
+
+const SLIDE_FRESH_RETRY_ATTEMPTS = 2;
+
+/** Wraps generateOneSlide with fresh-conversation retries — in case the model gets stuck in a bad conversational rut within one attempt, not just a bad single response. */
+async function generateOneSlideWithRetries(
+  modelRuntime: any,
+  found: unknown,
+  systemPrompt: string,
+  entry: SmartOutlineEntry,
+  ctx: { totalSlides: number; language?: string | null },
+): Promise<SmartSlide> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < SLIDE_FRESH_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await generateOneSlide(modelRuntime, found, systemPrompt, entry, ctx);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (lastErr instanceof SmartGenerationError) throw lastErr;
+  throw new SmartGenerationError(
+    `Failed to generate slide ${entry.index + 1} ("${entry.title}") after ${SLIDE_FRESH_RETRY_ATTEMPTS} fresh attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
+    { slideIndex: entry.index },
+  );
+}
+
+// ── Parallel orchestration for phase 2 ──────────────────────────────────
+
+/** Mirrors the RENDER_CONCURRENCY=6 precedent used elsewhere in this codebase for concurrent export rendering, so a 20-slide deck doesn't trip the model provider's own rate limit. */
+const SLIDE_GENERATION_CONCURRENCY = 6;
+
+/**
+ * Anthropic only creates a prompt-cache entry once the first response
+ * begins streaming — firing all N slide calls at the exact same instant
+ * means none of them can hit cache on the shared systemPrompt. This is a
+ * heuristic approximation of "wait for the first response to begin," not a
+ * guarantee; it trades a small fixed delay for meaningfully better odds
+ * that calls 2..N land on a warm cache.
+ */
+const CACHE_WARMUP_DELAY_MS = 350;
+
+export type SmartGenerationProgressEvent =
+  | { phase: "outline"; status: "started" | "done" }
+  | { phase: "slide"; slideIndex: number; totalSlides: number; status: "started" | "done" };
+
+async function generateSlidesInParallel(
+  modelRuntime: any,
+  found: unknown,
+  systemPrompt: string,
+  entries: SmartOutlineEntry[],
+  ctx: { totalSlides: number; language?: string | null; onProgress?: (event: SmartGenerationProgressEvent) => void },
+  target: SmartSlide[],
+): Promise<void> {
+  if (entries.length === 0) return;
+
+  const runOne = async (entry: SmartOutlineEntry): Promise<void> => {
+    ctx.onProgress?.({ phase: "slide", slideIndex: entry.index, totalSlides: ctx.totalSlides, status: "started" });
+    const slide = await generateOneSlideWithRetries(modelRuntime, found, systemPrompt, entry, ctx);
+    target[entry.index] = slide;
+    ctx.onProgress?.({ phase: "slide", slideIndex: entry.index, totalSlides: ctx.totalSlides, status: "done" });
+  };
+
+  const [first, ...rest] = entries;
+  const firstPromise = runOne(first);
+  if (rest.length > 0) {
+    await new Promise((resolve) => setTimeout(resolve, CACHE_WARMUP_DELAY_MS));
+    await runWithConcurrency(rest, Math.max(1, SLIDE_GENERATION_CONCURRENCY - 1), (entry) => runOne(entry));
+  }
+  await firstPromise;
 }
 
 // ── Orchestration ────────────────────────────────────────────────────────
@@ -614,12 +767,6 @@ export async function attemptTargetedRepair(
 export function resolveSmartSlideCount(value: number | null | undefined): number {
   if (value == null || value <= 0) return DEFAULT_SMART_SLIDE_COUNT;
   return Math.min(value, MAX_SMART_SLIDE_COUNT);
-}
-
-export interface SmartGenerationProgressEvent {
-  slideIndex: number;
-  totalSlides: number;
-  status: "started" | "done";
 }
 
 export async function generateSmartPresentation(
@@ -646,78 +793,39 @@ export async function generateSmartPresentation(
   const includeTitleSlide = opts.include_title_slide ?? true;
   const includeToc = opts.include_table_of_contents ?? false;
 
-  let lastError: Error | null = null;
-  let retryError: string | null = null;
+  opts.onProgress?.({ phase: "outline", status: "started" });
+  const { title, designBrief, outline, tocSlide } = await generateSmartOutline(deps.modelRuntime, found, {
+    content: opts.content,
+    n_slides: nSlides,
+    language: opts.language,
+    tone: opts.tone,
+    verbosity: opts.verbosity,
+    instructions: opts.instructions,
+    include_title_slide: includeTitleSlide,
+    include_table_of_contents: includeToc,
+    design_reference: opts.design_reference,
+  });
+  opts.onProgress?.({ phase: "outline", status: "done" });
 
-  for (let attempt = 0; attempt < SMART_GENERATION_MAX_ATTEMPTS; attempt++) {
-    const userPrompt = buildSmartUserPrompt({
-      content: opts.content,
-      n_slides: nSlides,
-      language: opts.language,
-      tone: opts.tone,
-      verbosity: opts.verbosity,
-      instructions: opts.instructions,
-      include_title_slide: includeTitleSlide,
-      include_table_of_contents: includeToc,
-      retry_error: retryError,
-      design_reference: opts.design_reference,
-    });
+  const tocIndex = includeToc ? (includeTitleSlide ? 1 : 0) : -1;
+  const slidesToGenerate = outline.filter((entry) => entry.index !== tocIndex);
 
-    try {
-      const stream = deps.modelRuntime.streamSimple(found, {
-        systemPrompt: SMART_DECK_SYSTEM_PROMPT,
-        messages: [{ role: "user", content: [{ type: "text", text: userPrompt }] }],
-      });
+  const systemPrompt = buildSlideSystemPrompt(designBrief);
+  const slides: SmartSlide[] = new Array(nSlides);
+  if (tocSlide) slides[tocIndex] = tocSlide;
 
-      // Report per-slide progress as delimiters complete in the streamed
-      // text, instead of waiting silently for the whole deck. Requested
-      // directly: the frontend has no way to show "slide 2 of 4" today
-      // because generation is one big blocking call — this is that signal.
-      let buffer = "";
-      let startedCount = 0;
-      let doneCount = 0;
-      for await (const event of stream) {
-        if (event.type !== "text_delta" || !event.delta) continue;
-        buffer += event.delta;
-        const starts = (buffer.match(/<!--\s*SLIDE_START\s*-->/gi) ?? []).length;
-        while (startedCount < starts) {
-          opts.onProgress?.({ slideIndex: startedCount, totalSlides: nSlides, status: "started" });
-          startedCount++;
-        }
-        const ends = (buffer.match(/<!--\s*SLIDE_END\s*-->/gi) ?? []).length;
-        while (doneCount < ends) {
-          opts.onProgress?.({ slideIndex: doneCount, totalSlides: nSlides, status: "done" });
-          doneCount++;
-        }
-      }
-      const msg = await stream.result();
-      const text = extractText(msg);
-      if (!text.trim()) throw new SmartGenerationError("Model returned no text content while generating the Smart presentation");
+  await generateSlidesInParallel(
+    deps.modelRuntime,
+    found,
+    systemPrompt,
+    slidesToGenerate,
+    { totalSlides: nSlides, language: opts.language, onProgress: opts.onProgress },
+    slides,
+  );
 
-      const { title, slides } = parseSmartPresentationHtml(text, {
-        expected_slide_count: nSlides,
-        include_title_slide: includeTitleSlide,
-        include_table_of_contents: includeToc,
-      });
-      return { title, slides };
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      retryError = lastError.message;
+  slides.forEach((slide, index) =>
+    validateSlidePosition(slide, index, { include_title_slide: includeTitleSlide, include_table_of_contents: includeToc }),
+  );
 
-      // A failure traceable to one slide gets a cheap, targeted fix attempt
-      // first (a small tool-calling loop editing just that slide) instead of
-      // immediately paying for a full-deck regeneration. Only falls through
-      // to the regeneration retry below if repair can't produce a valid
-      // result within its own small budget.
-      if (err instanceof SmartGenerationError && err.slideIndex !== undefined && err.partial) {
-        const repaired = await attemptTargetedRepair(deps, found, err, {
-          include_title_slide: includeTitleSlide,
-          include_table_of_contents: includeToc,
-        });
-        if (repaired) return repaired;
-      }
-    }
-  }
-
-  throw new SmartGenerationError(`Failed to generate the Smart presentation after ${SMART_GENERATION_MAX_ATTEMPTS} attempts: ${lastError?.message ?? "unknown error"}`);
+  return { title, slides };
 }

@@ -232,6 +232,121 @@ export interface DeleteMemoryTopicCommand {
 	topic: string;
 }
 
+// ── MCP connector commands ("My Connectors") ────────────────────────────────
+
+export interface McpConnectorInput {
+	id?: string;
+	name: string;
+	enabledByDefault: boolean;
+	transport: "stdio" | "http";
+	/** stdio only */
+	command?: string;
+	args?: string[];
+	env?: Record<string, string>;
+	/** http only */
+	url?: string;
+	headers?: Record<string, string>;
+}
+
+export interface ListMcpConnectorsCommand {
+	type: "list_mcp_connectors";
+	id: string;
+	/** When set, each connector is annotated with whether it's enabled in this session right now. */
+	sessionId?: string;
+}
+
+export interface SaveMcpConnectorCommand {
+	type: "save_mcp_connector";
+	id: string;
+	connector: McpConnectorInput;
+}
+
+export interface DeleteMcpConnectorCommand {
+	type: "delete_mcp_connector";
+	id: string;
+	connectorId: string;
+}
+
+export interface TestMcpConnectorCommand {
+	type: "test_mcp_connector";
+	id: string;
+	connector: McpConnectorInput;
+}
+
+export interface SetSessionMcpConnectorCommand {
+	type: "set_session_mcp_connector";
+	id: string;
+	sessionId: string;
+	connectorId: string;
+	enabled: boolean;
+}
+
+export interface McpConnectorOAuthStartCommand {
+	type: "mcp_connector_oauth_start";
+	id: string;
+	connectorId: string;
+}
+
+export interface McpConnectorOAuthSubmitCodeCommand {
+	type: "mcp_connector_oauth_submit_code";
+	id: string;
+	connectorId: string;
+	code: string;
+}
+
+// ── Meeting recording commands ("Record Meeting") ───────────────────────────
+
+export interface StartMeetingRecordingCommand {
+	type: "start_meeting_recording";
+	id: string;
+}
+
+export interface MeetingAudioChunkCommand {
+	type: "meeting_audio_chunk";
+	id: string;
+	/** Base64-encoded mono PCM16LE samples. */
+	data: string;
+	sampleRate: number;
+}
+
+export interface StopMeetingRecordingCommand {
+	type: "stop_meeting_recording";
+	id: string;
+}
+
+export interface SaveMeetingCommand {
+	type: "save_meeting";
+	id: string;
+	meetingId?: string;
+	title: string;
+	transcript: string;
+}
+
+export interface SummarizeMeetingCommand {
+	type: "summarize_meeting";
+	id: string;
+	meetingId: string;
+	/** Summary style — one of SUMMARY_TEMPLATES's ids in handlers/meetings.ts. Defaults to "general". */
+	template?: string;
+}
+
+export interface ListMeetingsCommand {
+	type: "list_meetings";
+	id: string;
+}
+
+export interface GetMeetingCommand {
+	type: "get_meeting";
+	id: string;
+	meetingId: string;
+}
+
+export interface DeleteMeetingCommand {
+	type: "delete_meeting";
+	id: string;
+	meetingId: string;
+}
+
 // ── Extension commands ─────────────────────────────────────────────────────
 
 export interface ListExtensionsCommand {
@@ -455,6 +570,21 @@ export type Command =
 	| GetMemoryNoteCommand
 	| SaveMemoryNoteCommand
 	| DeleteMemoryTopicCommand
+	| StartMeetingRecordingCommand
+	| MeetingAudioChunkCommand
+	| StopMeetingRecordingCommand
+	| SaveMeetingCommand
+	| SummarizeMeetingCommand
+	| ListMeetingsCommand
+	| GetMeetingCommand
+	| DeleteMeetingCommand
+	| ListMcpConnectorsCommand
+	| SaveMcpConnectorCommand
+	| DeleteMcpConnectorCommand
+	| TestMcpConnectorCommand
+	| SetSessionMcpConnectorCommand
+	| McpConnectorOAuthStartCommand
+	| McpConnectorOAuthSubmitCodeCommand
 	| ListExtensionsCommand
 	| TasksListCommand
 	| TasksDeleteCommand

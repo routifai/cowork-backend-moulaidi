@@ -72,7 +72,7 @@ export async function handleGetModels(
  * whichever session is currently active. Sends the standard "Not
  * initialized" error and returns undefined if no session can be resolved.
  */
-function resolveTargetSession(
+export function resolveTargetSession(
 	deps: HandlerDependencies,
 	cmd: { id: string; sessionId?: string },
 ): SessionState | undefined {

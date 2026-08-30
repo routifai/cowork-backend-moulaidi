@@ -90,10 +90,14 @@ export async function bootstrapApp(): Promise<BootstrappedApp> {
 
 		applyBundledNpm(container.settingsManager);
 
+		// Mutable box shared with the resource loader's getEnabledConnectorIds
+		// closure — see app/session-state.ts's mcpConnectorIds doc comment.
+		const mcpConnectorIds: { current: Set<string> | undefined } = { current: undefined };
 		const resourceLoader = await buildResourceLoader(
 			workspaceCwd,
 			container.hypatiaDir,
 			container.settingsManager,
+			{ getEnabledConnectorIds: () => mcpConnectorIds.current },
 		);
 
 		const sessionManager = SessionManager.create(workspaceCwd);
@@ -134,6 +138,7 @@ export async function bootstrapApp(): Promise<BootstrappedApp> {
 			promptRunner,
 			createdAt: Date.now(),
 			lastActivity: Date.now(),
+			mcpConnectorIds,
 		});
 		container.activeSessionId = id;
 		container.initialized = true;

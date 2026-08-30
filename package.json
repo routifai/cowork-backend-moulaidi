@@ -19,6 +19,8 @@
     "@earendil-works/pi-ai": "^0.80.10",
     "@earendil-works/pi-coding-agent": "^0.80.10",
     "@earendil-works/pi-tui": "^0.80.10",
+    "@aws-sdk/client-transcribe-streaming": "^3.1121.0",
+    "@modelcontextprotocol/client": "^2.0.0",
     "better-sqlite3": "^13.0.3",
     "jiti": "^2.7.0",
     "openai": "^7.5.0",

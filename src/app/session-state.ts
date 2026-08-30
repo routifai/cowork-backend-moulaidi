@@ -28,4 +28,15 @@ export interface SessionState {
 	promptRunner: PromptRunner;
 	createdAt: number;
 	lastActivity: number;
+	/**
+	 * This session's MCP connector enablement, in-memory only (resets on a
+	 * fresh/reopened session or app restart — see docs/plans, "My Connectors").
+	 * `current` is `undefined` until the user makes an explicit per-session
+	 * toggle; the resource loader falls back to each connector's stored
+	 * `enabledByDefault` until then. The box is shared with the closure passed
+	 * to `buildResourceLoader`'s `getEnabledConnectorIds`, so mutating
+	 * `.current` and calling `session.reload()` is what makes a toggle apply
+	 * live — see commands/handlers/mcp-connectors.ts.
+	 */
+	mcpConnectorIds: { current: Set<string> | undefined };
 }

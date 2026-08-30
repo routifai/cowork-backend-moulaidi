@@ -13,16 +13,18 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 	createAgentSession: vi.fn(async () => ({ session: { abort: vi.fn(), subscribe: vi.fn() } })),
 }));
 
-const buildResourceLoaderMock = vi.fn(async (_cwd: string, _hypatiaDir: string, _settings: unknown) => ({
-	reload: vi.fn(),
-}));
+const buildResourceLoaderMock = vi.fn(
+	async (_cwd: string, _hypatiaDir: string, _settings: unknown, _opts?: unknown) => ({
+		reload: vi.fn(),
+	}),
+);
 
 vi.mock("../../agent-init.js", () => ({
 	resolveWorkspace: vi.fn((cwd: string | undefined) => cwd ?? "/default/cwd"),
 	defaultWorkspaceDir: () => "/default/cwd",
 	piAgentDir: () => "/pi/agent/dir",
-	buildResourceLoader: (cwd: string, hypatiaDir: string, settings: unknown) =>
-		buildResourceLoaderMock(cwd, hypatiaDir, settings),
+	buildResourceLoader: (cwd: string, hypatiaDir: string, settings: unknown, opts?: unknown) =>
+		buildResourceLoaderMock(cwd, hypatiaDir, settings, opts),
 }));
 
 const noop = () => {};
@@ -75,6 +77,7 @@ describe("handleNewSession", () => {
 			"/Users/simo/other-project",
 			"/hypatia-dir",
 			deps.settingsManager,
+			{ getEnabledConnectorIds: expect.any(Function) },
 		);
 	});
 
@@ -90,6 +93,7 @@ describe("handleNewSession", () => {
 			promptRunner: { subscribeSession: noop, runPromptTask: async () => {} } as any,
 			createdAt: 0,
 			lastActivity: 0,
+			mcpConnectorIds: { current: undefined },
 		};
 		const deps = mockDeps({
 			activeSessionId: existing.id,

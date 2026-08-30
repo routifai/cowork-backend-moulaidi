@@ -42,6 +42,7 @@ async function spawnSession(
 	deps: HandlerDependencies,
 	cwd: string,
 	resourceLoader: any,
+	mcpConnectorIds: { current: Set<string> | undefined },
 ): Promise<string> {
 	const { SessionManager, createAgentSession } = await import("@earendil-works/pi-coding-agent");
 	const sessionManager = SessionManager.create(cwd);
@@ -66,6 +67,7 @@ async function spawnSession(
 		promptRunner,
 		createdAt: Date.now(),
 		lastActivity: Date.now(),
+		mcpConnectorIds,
 	});
 	deps.setActiveSessionId(id);
 	return id;
@@ -83,8 +85,13 @@ export async function handleNewSession(deps: HandlerDependencies, cmd: any): Pro
 	// so a brand-new session's system prompt always reflects up-to-date
 	// project memory/instructions, not a stale cached one.
 	const { buildResourceLoader } = await import("../../agent-init.js");
-	const resourceLoader = await buildResourceLoader(cwd, deps.hypatiaDir, deps.settingsManager);
-	const file = await spawnSession(deps, cwd, resourceLoader);
+	// Mutable box shared with the resource loader's getEnabledConnectorIds
+	// closure — see app/session-state.ts's mcpConnectorIds doc comment.
+	const mcpConnectorIds: { current: Set<string> | undefined } = { current: undefined };
+	const resourceLoader = await buildResourceLoader(cwd, deps.hypatiaDir, deps.settingsManager, {
+		getEnabledConnectorIds: () => mcpConnectorIds.current,
+	});
+	const file = await spawnSession(deps, cwd, resourceLoader, mcpConnectorIds);
 	send({ type: "result", id: cmd.id, data: { success: true, cwd, file } });
 }
 
@@ -118,10 +125,12 @@ export async function handleLoadSession(deps: HandlerDependencies, cmd: any): Pr
 			const { buildResourceLoader } = await import("../../agent-init.js");
 
 			const sessionCwd = resolveWorkspace(loaded.cwd, deps.hypatiaDir);
+			const mcpConnectorIds: { current: Set<string> | undefined } = { current: undefined };
 			const resourceLoader = await buildResourceLoader(
 				sessionCwd,
 				deps.hypatiaDir,
 				deps.settingsManager,
+				{ getEnabledConnectorIds: () => mcpConnectorIds.current },
 			);
 
 			log("load_session: rebinding agent session for %s", path);
@@ -157,6 +166,7 @@ export async function handleLoadSession(deps: HandlerDependencies, cmd: any): Pr
 				promptRunner,
 				createdAt: existing?.createdAt ?? Date.now(),
 				lastActivity: Date.now(),
+				mcpConnectorIds,
 			});
 			deps.setActiveSessionId(id);
 			log("load_session: ready to send result");

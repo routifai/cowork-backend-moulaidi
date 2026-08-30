@@ -61,6 +61,29 @@ import {
 	handleDeleteMemoryTopic,
 } from "./handlers/memory.js";
 
+// ── MCP connector handlers ("My Connectors") ────────────────────────────────
+import {
+	handleListMcpConnectors,
+	handleSaveMcpConnector,
+	handleDeleteMcpConnector,
+	handleTestMcpConnector,
+	handleSetSessionMcpConnector,
+	handleMcpConnectorOAuthStart,
+	handleMcpConnectorOAuthSubmitCode,
+} from "./handlers/mcp-connectors.js";
+
+// ── Meeting recording handlers ("Record Meeting") ───────────────────────────
+import {
+	handleStartMeetingRecording,
+	handleMeetingAudioChunk,
+	handleStopMeetingRecording,
+	handleSaveMeeting,
+	handleSummarizeMeeting,
+	handleListMeetings,
+	handleGetMeeting,
+	handleDeleteMeeting,
+} from "./handlers/meetings.js";
+
 // ── Types ──────────────────────────────────────────────────────────────────
 import { send, log, logWarn } from "../protocol.js";
 import type { Command } from "./types.js";
@@ -245,6 +268,74 @@ export function createHandler(deps: HandlerDependencies): (cmd: Command) => Prom
 
 			case "delete_memory_topic":
 				await handleDeleteMemoryTopic(deps, cmd as any);
+				break;
+
+			// ═══════════════════════════════════════════════════════════════
+			// MCP connectors ("My Connectors")
+			// ═══════════════════════════════════════════════════════════════
+
+			case "list_mcp_connectors":
+				await handleListMcpConnectors(deps, cmd as any);
+				break;
+
+			case "save_mcp_connector":
+				await handleSaveMcpConnector(deps, cmd as any);
+				break;
+
+			case "delete_mcp_connector":
+				await handleDeleteMcpConnector(deps, cmd as any);
+				break;
+
+			case "test_mcp_connector":
+				await handleTestMcpConnector(deps, cmd as any);
+				break;
+
+			case "set_session_mcp_connector":
+				await handleSetSessionMcpConnector(deps, cmd as any);
+				break;
+
+			case "mcp_connector_oauth_start":
+				await handleMcpConnectorOAuthStart(deps, cmd as any);
+				break;
+
+			case "mcp_connector_oauth_submit_code":
+				await handleMcpConnectorOAuthSubmitCode(deps, cmd as any);
+				break;
+
+			// ═══════════════════════════════════════════════════════════════
+			// Meeting recording ("Record Meeting")
+			// ═══════════════════════════════════════════════════════════════
+
+			case "start_meeting_recording":
+				await handleStartMeetingRecording(deps, cmd as any);
+				break;
+
+			case "meeting_audio_chunk":
+				await handleMeetingAudioChunk(deps, cmd as any);
+				break;
+
+			case "stop_meeting_recording":
+				await handleStopMeetingRecording(deps, cmd as any);
+				break;
+
+			case "save_meeting":
+				await handleSaveMeeting(deps, cmd as any);
+				break;
+
+			case "summarize_meeting":
+				await handleSummarizeMeeting(deps, cmd as any);
+				break;
+
+			case "list_meetings":
+				await handleListMeetings(deps, cmd as any);
+				break;
+
+			case "get_meeting":
+				await handleGetMeeting(deps, cmd as any);
+				break;
+
+			case "delete_meeting":
+				await handleDeleteMeeting(deps, cmd as any);
 				break;
 
 		// ═══════════════════════════════════════════════════════════════

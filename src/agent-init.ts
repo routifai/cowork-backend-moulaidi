@@ -36,6 +36,7 @@ import piAnthropicMessages from "./vendor/anthropic-messages/extensions/index.js
 import showArtifactExtension from "./extensions/show-artifact.js";
 import saveMemoryExtension from "./extensions/save-memory.js";
 import findSkillExtension from "./extensions/find-skill.js";
+import mcpExtension from "./mcp/mcp-extension.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -158,12 +159,22 @@ export async function buildResourceLoader(
 	workspaceCwd: string,
 	hypatiaDir: string,
 	settingsManager: ReturnType<typeof SettingsManager.inMemory>,
-	opts: { includePersona?: boolean } = {},
+	opts: {
+		includePersona?: boolean;
+		/**
+		 * Which MCP connectors are enabled *for the session this loader belongs
+		 * to*. A getter (not a fixed array) so a later `session.reload()` — see
+		 * app/session-state.ts's `mcpConnectorIds` box — picks up a toggle made
+		 * after the session started without rebuilding the loader itself.
+		 */
+		getEnabledConnectorIds?: () => Set<string> | undefined;
+	} = {},
 ): Promise<DefaultResourceLoader> {
 	if (!settingsManager) {
 		throw new Error("buildResourceLoader: settingsManager not initialized");
 	}
 	const includePersona = opts.includePersona ?? true;
+	const getEnabledConnectorIds = opts.getEnabledConnectorIds ?? (() => undefined);
 	const piResourceDir = piAgentDir();
 	ensureDir(piResourceDir);
 
@@ -192,6 +203,7 @@ export async function buildResourceLoader(
 			showArtifactExtension,
 			(pi: ExtensionAPI) => saveMemoryExtension(pi, { baseDir: hypatiaAgentDir(hypatiaDir), workspaceCwd }),
 			(pi: ExtensionAPI) => findSkillExtension(pi, { agentDir: piResourceDir, workspaceCwd }),
+			(pi: ExtensionAPI) => mcpExtension(pi, { agentDir: hypatiaAgentDir(hypatiaDir), getEnabledConnectorIds }),
 			...diskExtensionFactories,
 		],
 		systemPromptOverride: () => {
